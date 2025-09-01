@@ -1,0 +1,12 @@
+[package]
+name = "pushkind-hedwig"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "send_email"
+
+[[bin]]
+name = "check_reply"
+
+[dependencies]
