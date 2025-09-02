@@ -1,5 +1,4 @@
 use std::env;
-use std::error::Error;
 use std::sync::Arc;
 
 use dotenvy::dotenv;
@@ -13,6 +12,7 @@ use pushkind_common::domain::emailer::email::{Email, EmailRecipient, UpdateEmail
 use pushkind_common::domain::emailer::hub::Hub;
 use pushkind_common::models::emailer::zmq::ZMQSendEmailMessage;
 
+use pushkind_hedwig::errors::Error;
 use pushkind_hedwig::repository::{DieselRepository, EmailReader, EmailWriter, HubReader};
 
 async fn send_smtp_message(
@@ -20,7 +20,7 @@ async fn send_smtp_message(
     email: &Email,
     recipient: &EmailRecipient,
     domain: &str,
-) -> Result<(), mail_send::Error> {
+) -> Result<(), Error> {
     let template = hub.email_template.as_deref().unwrap_or_default();
 
     let unsubscribe_url = hub.unsubscribe_url();
@@ -84,21 +84,22 @@ async fn send_smtp_message(
         .connect()
         .await?
         .send(message)
-        .await
+        .await?;
+    Ok(())
 }
 
 async fn send_email(
     msg: ZMQSendEmailMessage,
     repo: DieselRepository,
     domain: &str,
-) -> Result<(), Box<dyn Error>> {
+) -> Result<(), Error> {
     let email = match msg {
         ZMQSendEmailMessage::RetryEmail((email_id, hub_id)) => {
             match repo.get_email_by_id(email_id, hub_id)? {
                 Some(email) => email,
                 None => {
                     log::error!("Email not found for email_id: {email_id}");
-                    return Err("Email not found".into());
+                    return Err(Error::Config("email not found".into()));
                 }
             }
         }
@@ -157,9 +158,7 @@ async fn send_email(
     Ok(())
 }
 
-/// Entry point for the email sender worker.
-#[tokio::main]
-async fn main() {
+async fn run() -> Result<(), Error> {
     env_logger::init_from_env(env_logger::Env::default().default_filter_or("info"));
     dotenv().ok(); // Load .env file
 
@@ -169,26 +168,17 @@ async fn main() {
     let zmq_address =
         env::var("ZMQ_EMAILER_SUB").unwrap_or_else(|_| "tcp://127.0.0.1:5558".to_string());
     let context = zmq::Context::new();
-    let responder = context.socket(zmq::SUB).expect("Cannot create zmq socket");
-    responder
-        .connect(&zmq_address)
-        .expect("Cannot connect to zmq port");
-    responder.set_subscribe(b"").expect("SUBSCRIBE failed");
+    let responder = context.socket(zmq::SUB)?;
+    responder.connect(&zmq_address)?;
+    responder.set_subscribe(b"")?;
 
-    let pool = match establish_connection_pool(&database_url) {
-        Ok(pool) => pool,
-        Err(e) => {
-            log::error!("Failed to establish database connection: {e}");
-            std::process::exit(1);
-        }
-    };
-
+    let pool = establish_connection_pool(&database_url)?;
     let repo = DieselRepository::new(pool);
 
     log::info!("Starting email worker");
 
     loop {
-        let msg = responder.recv_bytes(0).unwrap();
+        let msg = responder.recv_bytes(0)?;
         match serde_json::from_slice::<ZMQSendEmailMessage>(&msg) {
             Ok(parsed) => {
                 let domain = Arc::clone(&domain);
@@ -202,8 +192,16 @@ async fn main() {
             }
             Err(e) => {
                 log::error!("Error receiving message: {e}");
-                continue;
             }
         }
+    }
+}
+
+/// Entry point for the email sender worker.
+#[tokio::main]
+async fn main() {
+    if let Err(e) = run().await {
+        log::error!("{e}");
+        std::process::exit(1);
     }
 }

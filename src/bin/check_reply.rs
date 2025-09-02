@@ -11,6 +11,7 @@ use pushkind_common::models::emailer::zmq::ZMQReplyMessage;
 use pushkind_common::zmq::{ZmqSender, ZmqSenderOptions};
 use tokio::task;
 
+use pushkind_hedwig::errors::Error;
 use pushkind_hedwig::repository::{DieselRepository, EmailReader, EmailWriter, HubReader};
 
 fn strip_html_tags(input: &str) -> String {
@@ -319,9 +320,7 @@ fn monitor_hub(repo: DieselRepository, hub: Hub, domain: String, zmq_sender: &Zm
     }
 }
 
-/// Entry point for the reply-checking worker.
-#[tokio::main]
-async fn main() {
+async fn run() -> Result<(), Error> {
     env_logger::init_from_env(env_logger::Env::default().default_filter_or("info"));
     dotenv().ok();
 
@@ -329,27 +328,14 @@ async fn main() {
     let domain = Arc::new(env::var("DOMAIN").unwrap_or_default());
     let zmq_address = env::var("ZMQ_REPLIER_PUB").unwrap_or("tcp://127.0.0.1:5559".to_string());
 
-    let db_pool = match establish_connection_pool(&database_url) {
-        Ok(pool) => pool,
-        Err(e) => {
-            log::error!("Cannot establish db connection: {e}");
-            return;
-        }
-    };
-
+    let db_pool = establish_connection_pool(&database_url)?;
     let repo = DieselRepository::new(db_pool);
 
     let zmq_sender = Arc::new(ZmqSender::start(ZmqSenderOptions::pub_default(
         &zmq_address,
     )));
 
-    let hubs = match repo.list_hubs() {
-        Ok(h) => h,
-        Err(e) => {
-            log::error!("Cannot get hubs: {e}");
-            return;
-        }
-    };
+    let hubs = repo.list_hubs()?;
 
     let mut handles = vec![];
     for hub in hubs {
@@ -362,10 +348,20 @@ async fn main() {
     }
 
     for handle in handles {
-        match handle.await {
-            Ok(_) => (), // task finished fine
-            Err(e) => log::error!("Task panicked: {e:?}"),
+        if let Err(e) = handle.await {
+            log::error!("Task panicked: {e:?}");
         }
+    }
+
+    Ok(())
+}
+
+/// Entry point for the reply-checking worker.
+#[tokio::main]
+async fn main() {
+    if let Err(e) = run().await {
+        log::error!("{e}");
+        std::process::exit(1);
     }
 }
 
