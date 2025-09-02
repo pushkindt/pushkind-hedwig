@@ -35,8 +35,16 @@ pub async fn run(database_url: &str, domain: &str, zmq_address: &str) -> Result<
     }
 
     for handle in handles {
-        if let Err(e) = handle.await {
-            log::error!("Task panicked: {e:?}");
+        match handle.await {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
+                log::error!("monitor_hub failed: {e}");
+                return Err(e);
+            }
+            Err(e) => {
+                log::error!("Task panicked: {e:?}");
+                return Err(Error::Config(format!("task panicked: {e:?}")));
+            }
         }
     }
 
