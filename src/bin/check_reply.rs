@@ -319,6 +319,7 @@ fn monitor_hub(repo: DieselRepository, hub: Hub, domain: String, zmq_sender: &Zm
     }
 }
 
+/// Entry point for the reply-checking worker.
 #[tokio::main]
 async fn main() {
     env_logger::init_from_env(env_logger::Env::default().default_filter_or("info"));
