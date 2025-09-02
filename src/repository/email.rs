@@ -5,7 +5,7 @@ use pushkind_common::domain::emailer::email::{
 };
 use pushkind_common::models::emailer::email::{
     Email as DbEmail, EmailRecipient as DbEmailRecipient, NewEmail as DbNewEmail,
-    NewEmailRecipient as DbNewEmailRecipient,
+    NewEmailRecipient as DbNewEmailRecipient, UpdateEmailRecipient as DbUpdateEmailRecipient,
 };
 use pushkind_common::repository::errors::{RepositoryError, RepositoryResult};
 
@@ -132,65 +132,12 @@ impl EmailWriter for DieselRepository {
             .select(email_recipients::email_id)
             .first(&mut conn)?;
 
-        if let Some(is_sent) = updates.is_sent {
-            diesel::update(email_recipients::table.filter(email_recipients::id.eq(recipient_id)))
-                .set((
-                    email_recipients::is_sent.eq(is_sent),
-                    email_recipients::updated_at.eq(chrono::Utc::now().naive_utc()),
-                ))
-                .execute(&mut conn)?;
-        }
-        if let Some(opened) = updates.opened {
-            diesel::update(email_recipients::table.filter(email_recipients::id.eq(recipient_id)))
-                .set((
-                    email_recipients::opened.eq(opened),
-                    email_recipients::updated_at.eq(chrono::Utc::now().naive_utc()),
-                ))
-                .execute(&mut conn)?;
-        }
-        if let Some(replied) = updates.replied {
-            diesel::update(email_recipients::table.filter(email_recipients::id.eq(recipient_id)))
-                .set((
-                    email_recipients::replied.eq(replied),
-                    email_recipients::updated_at.eq(chrono::Utc::now().naive_utc()),
-                ))
-                .execute(&mut conn)?;
-        }
-        if let Some(ref reply_text) = updates.reply {
-            diesel::update(email_recipients::table.filter(email_recipients::id.eq(recipient_id)))
-                .set((
-                    email_recipients::reply.eq(Some(reply_text.as_str())),
-                    email_recipients::updated_at.eq(chrono::Utc::now().naive_utc()),
-                ))
-                .execute(&mut conn)?;
-        }
-
-        // Recalculate num_opened, num_sent, num_replied for emails::table
-        let num_sent = email_recipients::table
-            .filter(email_recipients::email_id.eq(email_id))
-            .filter(email_recipients::is_sent.eq(true))
-            .count()
-            .get_result::<i64>(&mut conn)? as i32;
-
-        let num_opened = email_recipients::table
-            .filter(email_recipients::email_id.eq(email_id))
-            .filter(email_recipients::opened.eq(true))
-            .count()
-            .get_result::<i64>(&mut conn)? as i32;
-
-        let num_replied = email_recipients::table
-            .filter(email_recipients::email_id.eq(email_id))
-            .filter(email_recipients::replied.eq(true))
-            .count()
-            .get_result::<i64>(&mut conn)? as i32;
-
-        diesel::update(emails::table.filter(emails::id.eq(email_id)))
-            .set((
-                emails::num_sent.eq(num_sent),
-                emails::num_opened.eq(num_opened),
-                emails::num_replied.eq(num_replied),
-            ))
+        let changeset = DbUpdateEmailRecipient::from(updates);
+        diesel::update(email_recipients::table.filter(email_recipients::id.eq(recipient_id)))
+            .set(changeset)
             .execute(&mut conn)?;
+
+        DbEmail::recalc_email_stats(&mut conn, email_id)?;
 
         let email = emails::table
             .filter(emails::id.eq(email_id))
