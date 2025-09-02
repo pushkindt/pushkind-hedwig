@@ -3,6 +3,7 @@ pub mod parser;
 pub mod service;
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use pushkind_common::db::establish_connection_pool;
 use pushkind_common::zmq::{ZmqSender, ZmqSenderOptions};
@@ -17,7 +18,9 @@ pub async fn run(database_url: &str, domain: &str, zmq_address: &str) -> Result<
     let db_pool = establish_connection_pool(database_url)?;
     let repo = DieselRepository::new(db_pool);
 
-    let zmq_sender = Arc::new(ZmqSender::start(ZmqSenderOptions::pub_default(zmq_address)));
+    let zmq_sender = Arc::new(ZmqSender::start(ZmqSenderOptions::pub_default(
+        zmq_address,
+    ))?);
 
     let domain = Arc::new(domain.to_owned());
     let hubs = repo.list_hubs()?;
@@ -29,17 +32,68 @@ pub async fn run(database_url: &str, domain: &str, zmq_address: &str) -> Result<
         let repo = repo.clone();
         let domain = Arc::clone(&domain);
         let zmq_sender = zmq_sender.clone();
-        join_set.spawn_blocking(move || monitor_hub(repo, hub, domain.to_string(), &zmq_sender));
+        let hub_id = hub.id;
+        join_set.spawn(async move {
+            log::info!("Starting monitor loop for hub#{}", hub_id);
+            loop {
+                // Always fetch the latest hub config before each attempt
+                let hub_opt = match repo.get_hub_by_id(hub_id) {
+                    Ok(h) => h,
+                    Err(e) => {
+                        log::error!("Failed to fetch hub#{} config: {}", hub_id, e);
+                        tokio::time::sleep(Duration::from_secs(5)).await;
+                        continue;
+                    }
+                };
+
+                let Some(hub) = hub_opt else {
+                    log::warn!("Hub#{} not found. Will retry soon…", hub_id);
+                    tokio::time::sleep(Duration::from_secs(10)).await;
+                    continue;
+                };
+
+                // Run hub monitor in a child task to catch panics via JoinError
+                let repo_for_task = repo.clone();
+                let domain_for_task = domain.to_string();
+                let zmq_for_task = zmq_sender.clone();
+                let handle = tokio::spawn(async move {
+                    monitor_hub(repo_for_task, hub, domain_for_task, &zmq_for_task).await
+                });
+
+                match handle.await {
+                    Ok(Ok(())) => {
+                        log::info!("monitor_hub completed for hub#{}", hub_id);
+                        break;
+                    }
+                    Ok(Err(e)) => {
+                        log::error!(
+                            "monitor_hub failed for hub#{}: {} — restarting soon",
+                            hub_id,
+                            e
+                        );
+                    }
+                    Err(e) => {
+                        log::error!(
+                            "monitor_hub panicked for hub#{}: {:?} — restarting soon",
+                            hub_id,
+                            e
+                        );
+                    }
+                }
+
+                tokio::time::sleep(Duration::from_secs(5)).await;
+            }
+        });
     }
 
+    // Drain join handles; monitor tasks self-restart on failure
     while let Some(result) = join_set.join_next().await {
         match result {
-            Ok(Ok(())) => {}
-            Ok(Err(e)) => {
-                log::error!("monitor_hub failed: {e}");
+            Ok(()) => {
+                log::info!("A monitor task exited cleanly");
             }
             Err(e) => {
-                log::error!("Task panicked: {e:?}");
+                log::error!("A monitor task join error: {e:?}");
             }
         }
     }

@@ -11,7 +11,7 @@ use crate::repository::{DieselRepository, EmailReader, EmailWriter};
 use super::imap::{fetch_message_body, init_session};
 use super::parser::{extract_plain_reply, extract_recipient_id};
 
-pub fn process_reply(
+pub async fn process_reply(
     repo: &DieselRepository,
     hub_id: i32,
     recipient: &EmailRecipient,
@@ -23,7 +23,7 @@ pub fn process_reply(
         email: recipient.address.clone(),
         message: reply.clone().unwrap_or_default(),
     };
-    if let Err(e) = tokio::runtime::Handle::current().block_on(zmq_sender.send_json(&msg)) {
+    if let Err(e) = zmq_sender.send_json(&msg).await {
         log::error!("Cannot send ZMQ message: {e}");
     } else {
         log::info!("ZMQ message sent for email id: {}", recipient.email_id);
@@ -43,7 +43,7 @@ pub fn process_reply(
     }
 }
 
-pub fn process_new_message(
+pub async fn process_new_message(
     repo: &DieselRepository,
     session: &mut imap::Session<impl std::io::Read + std::io::Write>,
     uid: u32,
@@ -80,7 +80,7 @@ pub fn process_new_message(
     if let Some(recipient_id) = extract_recipient_id(header_str, domain) {
         let reply = fetch_message_body(session, uid).map(|b| extract_plain_reply(&b));
         match repo.get_email_recipient_by_id(recipient_id, hub_id) {
-            Ok(Some(recipient)) => process_reply(repo, hub_id, &recipient, reply, zmq_sender),
+            Ok(Some(recipient)) => process_reply(repo, hub_id, &recipient, reply, zmq_sender).await,
             Ok(None) => log::warn!(
                 "Recipient not found for id {} in hub#{}",
                 recipient_id,
@@ -96,7 +96,7 @@ pub fn process_new_message(
     }
 }
 
-pub fn monitor_hub(
+pub async fn monitor_hub(
     repo: DieselRepository,
     hub: Hub,
     domain: String,
@@ -137,7 +137,7 @@ pub fn monitor_hub(
 
         if let Some(uid) = search_result.iter().max() {
             let reply = fetch_message_body(&mut session, *uid).map(|b| extract_plain_reply(&b));
-            process_reply(&repo, hub.id, &recipient, reply, zmq_sender);
+            process_reply(&repo, hub.id, &recipient, reply, zmq_sender).await;
         }
     }
 
@@ -151,7 +151,9 @@ pub fn monitor_hub(
     loop {
         if let Err(e) = session.idle().and_then(|idle| idle.wait_keepalive()) {
             log::error!("Idle error in hub#{}: {e}", hub.id);
-            break;
+            // Treat idle errors as fatal to allow the caller to restart the job
+            let _ = session.logout();
+            return Err(e.into());
         }
 
         let search_query = format!("UID {}:*", last_uid + 1);
@@ -164,15 +166,11 @@ pub fn monitor_hub(
         };
 
         for uid in &new_uids {
-            process_new_message(&repo, &mut session, *uid, &domain, hub.id, zmq_sender);
+            process_new_message(&repo, &mut session, *uid, &domain, hub.id, zmq_sender).await;
         }
 
         if let Some(max_uid) = new_uids.iter().max() {
             last_uid = *max_uid;
         }
     }
-
-    session.logout()?;
-
-    Ok(())
 }

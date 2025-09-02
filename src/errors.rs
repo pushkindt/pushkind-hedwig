@@ -38,4 +38,8 @@ pub enum Error {
     /// Problems with environment or configuration.
     #[error("configuration error: {0}")]
     Config(String),
+
+    ///Problems with ZmqSender
+    #[error("zmq sender error: {0}")]
+    ZmqSender(#[from] pushkind_common::zmq::ZmqSenderError),
 }
