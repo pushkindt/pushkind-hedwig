@@ -10,3 +10,24 @@ name = "send_email"
 name = "check_reply"
 
 [dependencies]
+tokio = { version = "1.47.1", features = ["full"] }
+pushkind-common = { git = "https://github.com/pushkindt/pushkind-common.git", branch = "main", features = [
+    "db",
+    "zeromq",
+    "emailer",
+] }
+mail-send = { version = "0.5.1" }
+env_logger = "0.11.8"
+log = "0.4.27"
+serde_json = "1.0.143"
+imap = "2.4.1"
+dotenvy = "0.15.7"
+zmq = "0.10.0"
+native-tls = "0.2.14"
+diesel = { version = "2.2.12", features = [
+    "sqlite",
+    "r2d2",
+    "chrono",
+    "returning_clauses_for_sqlite_3_35",
+] }
+chrono = { version = "0.4.41", features = ["serde"] }
