@@ -1,3 +1,7 @@
+//! Hub repository implementation backed by Diesel.
+//!
+//! Supplies the [`HubReader`] trait for [`DieselRepository`].
+
 use diesel::prelude::*;
 use pushkind_common::domain::emailer::hub::Hub as DomainHub;
 use pushkind_common::models::emailer::hub::Hub as DbHub;

@@ -1,3 +1,8 @@
+//! Email repository implementation backed by Diesel.
+//!
+//! Provides [`EmailReader`] and [`EmailWriter`] trait implementations for
+//! [`DieselRepository`].
+
 use diesel::prelude::*;
 use pushkind_common::domain::emailer::email::{
     EmailRecipient as DomainEmailRecipient, EmailWithRecipients as DomainEmailWithRecipients,
