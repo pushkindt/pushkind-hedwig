@@ -1724,6 +1724,7 @@ dependencies = [
 name = "pushkind-hedwig"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "chrono",
  "diesel",
  "dotenvy",
