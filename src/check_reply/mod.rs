@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use pushkind_common::db::establish_connection_pool;
 use pushkind_common::zmq::{ZmqSender, ZmqSenderOptions};
-use tokio::task;
+use tokio::task::JoinSet;
 
 use crate::check_reply::service::monitor_hub;
 use crate::errors::Error;
@@ -21,7 +21,7 @@ pub async fn run(database_url: &str, domain: &str, zmq_address: &str) -> Result<
 
     let domain = Arc::new(domain.to_owned());
     let hubs = repo.list_hubs()?;
-    let mut handles = vec![];
+    let mut join_set = JoinSet::new();
 
     log::info!("Starting email checking worker");
 
@@ -29,13 +29,11 @@ pub async fn run(database_url: &str, domain: &str, zmq_address: &str) -> Result<
         let repo = repo.clone();
         let domain = Arc::clone(&domain);
         let zmq_sender = zmq_sender.clone();
-        handles.push(task::spawn_blocking(move || {
-            monitor_hub(repo, hub, domain.to_string(), &zmq_sender)
-        }));
+        join_set.spawn_blocking(move || monitor_hub(repo, hub, domain.to_string(), &zmq_sender));
     }
 
-    for handle in handles {
-        match handle.await {
+    while let Some(result) = join_set.join_next().await {
+        match result {
             Ok(Ok(())) => {}
             Ok(Err(e)) => {
                 log::error!("monitor_hub failed: {e}");
