@@ -1,40 +1,15 @@
-use chrono::NaiveDateTime;
 use diesel::prelude::*;
-use pushkind_common::db::DbConnection;
 use pushkind_common::domain::emailer::email::{
     EmailRecipient as DomainEmailRecipient, EmailWithRecipients as DomainEmailWithRecipients,
     NewEmail as DomainNewEmail, UpdateEmailRecipient as DomainUpdateEmailRecipient,
 };
 use pushkind_common::models::emailer::email::{
     Email as DbEmail, EmailRecipient as DbEmailRecipient, NewEmail as DbNewEmail,
-    NewEmailRecipient as DbNewEmailRecipient,
+    NewEmailRecipient as DbNewEmailRecipient, UpdateEmailRecipient as DbUpdateEmailRecipient,
 };
 use pushkind_common::repository::errors::{RepositoryError, RepositoryResult};
-use pushkind_common::schema::emailer::email_recipients;
 
 use crate::repository::{DieselRepository, EmailReader, EmailWriter};
-
-#[derive(AsChangeset)]
-#[diesel(table_name = email_recipients)]
-struct RecipientChangeset<'a> {
-    opened: Option<bool>,
-    is_sent: Option<bool>,
-    replied: Option<bool>,
-    reply: Option<&'a str>,
-    updated_at: Option<NaiveDateTime>,
-}
-
-impl<'a> From<&'a DomainUpdateEmailRecipient> for RecipientChangeset<'a> {
-    fn from(value: &'a DomainUpdateEmailRecipient) -> Self {
-        Self {
-            opened: value.opened,
-            is_sent: value.is_sent,
-            replied: value.replied,
-            reply: value.reply.as_deref(),
-            updated_at: Some(chrono::Utc::now().naive_utc()),
-        }
-    }
-}
 
 impl EmailReader for DieselRepository {
     fn list_not_replied_email_recipients(
@@ -157,12 +132,12 @@ impl EmailWriter for DieselRepository {
             .select(email_recipients::email_id)
             .first(&mut conn)?;
 
-        let changeset = RecipientChangeset::from(updates);
+        let changeset = DbUpdateEmailRecipient::from(updates);
         diesel::update(email_recipients::table.filter(email_recipients::id.eq(recipient_id)))
             .set(changeset)
             .execute(&mut conn)?;
 
-        recalc_email_stats(&mut conn, email_id)?;
+        DbEmail::recalc_email_stats(&mut conn, email_id)?;
 
         let email = emails::table
             .filter(emails::id.eq(email_id))
@@ -178,36 +153,4 @@ impl EmailWriter for DieselRepository {
             recipients: recipients.into_iter().map(Into::into).collect(),
         })
     }
-}
-
-fn recalc_email_stats(conn: &mut DbConnection, email_id: i32) -> RepositoryResult<()> {
-    use pushkind_common::schema::emailer::{email_recipients, emails};
-
-    let num_sent = email_recipients::table
-        .filter(email_recipients::email_id.eq(email_id))
-        .filter(email_recipients::is_sent.eq(true))
-        .count()
-        .get_result::<i64>(conn)? as i32;
-
-    let num_opened = email_recipients::table
-        .filter(email_recipients::email_id.eq(email_id))
-        .filter(email_recipients::opened.eq(true))
-        .count()
-        .get_result::<i64>(conn)? as i32;
-
-    let num_replied = email_recipients::table
-        .filter(email_recipients::email_id.eq(email_id))
-        .filter(email_recipients::replied.eq(true))
-        .count()
-        .get_result::<i64>(conn)? as i32;
-
-    diesel::update(emails::table.filter(emails::id.eq(email_id)))
-        .set((
-            emails::num_sent.eq(num_sent),
-            emails::num_opened.eq(num_opened),
-            emails::num_replied.eq(num_replied),
-        ))
-        .execute(conn)?;
-
-    Ok(())
 }
