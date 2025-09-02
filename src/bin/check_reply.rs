@@ -14,24 +14,19 @@ use tokio::task;
 use pushkind_hedwig::repository::{DieselRepository, EmailReader, EmailWriter, HubReader};
 
 fn strip_html_tags(input: &str) -> String {
-    let mut out = String::with_capacity(input.len());
-    let mut in_tag = false;
-    for c in input.chars() {
-        match c {
-            '<' => in_tag = true,
-            '>' => in_tag = false,
-            _ if !in_tag => out.push(c),
-            _ => {}
-        }
-    }
-    out
+    // Use an HTML parser to safely convert markup into plain text.
+    // This avoids edge cases with malformed tags and ensures that the
+    // resulting string contains no HTML elements.
+    let plain =
+        html2text::from_read(input.as_bytes(), usize::MAX).unwrap_or_else(|_| input.to_string());
+    plain.replace('\u{00a0}', " ")
 }
 
 fn extract_plain_reply(input: &str) -> String {
-    // 1) Strip HTML tags if present
-    let without_html = strip_html_tags(input);
+    // 1) Convert HTML to sanitized plain text
+    let sanitized = strip_html_tags(input);
     // 2) Normalize newlines
-    let normalized = without_html.replace('\r', "");
+    let normalized = sanitized.replace('\r', "");
     // 3) Remove quoted lines and cut off at common quote separators
     let mut result_lines = Vec::new();
     for line in normalized.lines() {
@@ -370,5 +365,22 @@ async fn main() {
             Ok(_) => (), // task finished fine
             Err(e) => log::error!("Task panicked: {e:?}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extracts_plain_text_from_html() {
+        let html = "<div>Hello <b>world</b></div>";
+        assert_eq!(extract_plain_reply(html), "Hello world");
+    }
+
+    #[test]
+    fn ignores_quoted_sections() {
+        let html = "<div>Thanks!</div><div><br></div><div>On Tue, Someone wrote:</div><blockquote><div>Original</div></blockquote>";
+        assert_eq!(extract_plain_reply(html), "Thanks!");
     }
 }
