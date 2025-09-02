@@ -4,43 +4,24 @@ use std::net::TcpStream;
 use imap::Session;
 use native_tls::{TlsConnector, TlsStream};
 
+use crate::errors::Error;
+
 /// Establish an IMAP session and select the INBOX.
 pub fn init_session(
     imap_server: &str,
     imap_port: u16,
     username: &str,
     password: &str,
-) -> Option<Session<TlsStream<TcpStream>>> {
-    let tls = match TlsConnector::builder().build() {
-        Ok(tls) => tls,
-        Err(e) => {
-            log::error!("Cannot build tls connector: {e}");
-            return None;
-        }
-    };
+) -> Result<Session<TlsStream<TcpStream>>, Error> {
+    let tls = TlsConnector::builder().build()?;
 
-    let client = match imap::connect((imap_server, imap_port), imap_server, &tls) {
-        Ok(client) => client,
-        Err(e) => {
-            log::error!("Cannot connect to imap server: {e}");
-            return None;
-        }
-    };
+    let client = imap::connect((imap_server, imap_port), imap_server, &tls)?;
 
-    let mut session = match client.login(username, password).map_err(|e| e.0) {
-        Ok(session) => session,
-        Err(e) => {
-            log::error!("Cannot login to imap server: {e}");
-            return None;
-        }
-    };
+    let mut session = client.login(username, password).map_err(|e| e.0)?;
 
-    if let Err(e) = session.select("INBOX") {
-        log::error!("Cannot select INBOX: {e}");
-        return None;
-    }
+    session.select("INBOX")?;
 
-    Some(session)
+    Ok(session)
 }
 
 /// Fetch the body of a message by UID.

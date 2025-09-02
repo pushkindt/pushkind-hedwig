@@ -1,11 +1,9 @@
 pub mod message_builder;
 pub mod service;
 
-use std::env;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use dotenvy::dotenv;
 use mail_send::SmtpClientBuilder;
 use mail_send::mail_builder::MessageBuilder;
 use pushkind_common::db::establish_connection_pool;
@@ -23,8 +21,13 @@ pub struct SmtpMailer;
 #[async_trait]
 impl Mailer for SmtpMailer {
     async fn send(&self, hub: &Hub, message: MessageBuilder<'_>) -> Result<(), Error> {
-        let smtp_server = hub.smtp_server.as_deref().unwrap_or_default();
-        let smtp_port = hub.smtp_port.unwrap_or(25) as u16;
+        let smtp_server = hub
+            .smtp_server
+            .as_deref()
+            .ok_or(Error::Config("Missed SMTP server address".to_owned()))?;
+        let smtp_port = hub
+            .smtp_port
+            .ok_or(Error::Config("Missed SMTP port".to_owned()))? as u16;
         let credentials = (
             hub.login.as_deref().unwrap_or_default(),
             hub.password.as_deref().unwrap_or_default(),
@@ -42,24 +45,18 @@ impl Mailer for SmtpMailer {
 }
 
 /// Entry point for the email sender worker.
-pub async fn run() -> Result<(), Error> {
-    env_logger::init_from_env(env_logger::Env::default().default_filter_or("info"));
-    dotenv().ok();
+pub async fn run(database_url: &str, domain: &str, zmq_address: &str) -> Result<(), Error> {
+    let db_pool = establish_connection_pool(database_url)?;
+    let repo = DieselRepository::new(db_pool);
 
-    let database_url = env::var("DATABASE_URL").unwrap_or_else(|_| "app.db".to_string());
-    let domain = Arc::from(env::var("DOMAIN").unwrap_or_default());
-
-    let zmq_address =
-        env::var("ZMQ_EMAILER_SUB").unwrap_or_else(|_| "tcp://127.0.0.1:5558".to_string());
     let context = zmq::Context::new();
     let responder = context.socket(zmq::SUB)?;
-    responder.connect(&zmq_address)?;
+    responder.connect(zmq_address)?;
     responder.set_subscribe(b"")?;
 
-    let pool = establish_connection_pool(&database_url)?;
-    let repo = DieselRepository::new(pool);
+    let domain = Arc::new(domain.to_owned());
 
-    log::info!("Starting email worker");
+    log::info!("Starting email sending worker");
 
     loop {
         let msg = responder.recv_bytes(0)?;

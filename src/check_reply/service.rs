@@ -5,6 +5,7 @@ use pushkind_common::domain::emailer::hub::Hub;
 use pushkind_common::models::emailer::zmq::ZMQReplyMessage;
 use pushkind_common::zmq::ZmqSender;
 
+use crate::errors::Error;
 use crate::repository::{DieselRepository, EmailReader, EmailWriter};
 
 use super::imap::{fetch_message_body, init_session};
@@ -95,30 +96,28 @@ pub fn process_new_message(
     }
 }
 
-pub fn monitor_hub(repo: DieselRepository, hub: Hub, domain: String, zmq_sender: &ZmqSender) {
+pub fn monitor_hub(
+    repo: DieselRepository,
+    hub: Hub,
+    domain: String,
+    zmq_sender: &ZmqSender,
+) -> Result<(), Error> {
     let (imap_server, imap_port, username, password) =
         match (&hub.imap_server, hub.imap_port, &hub.login, &hub.password) {
             (Some(server), Some(port), Some(username), Some(password)) => {
                 (server, port as u16, username, password)
             }
             _ => {
-                log::error!("Cannot get imap server and port for the hub#{}", hub.id);
-                return;
+                return Err(Error::Config(format!(
+                    "Cannot get imap server and port for the hub#{}",
+                    hub.id
+                )));
             }
         };
 
-    let mut session = match init_session(imap_server, imap_port, username, password) {
-        Some(s) => s,
-        None => return,
-    };
+    let mut session = init_session(imap_server, imap_port, username, password)?;
 
-    let recipients = match repo.list_not_replied_email_recipients(hub.id) {
-        Ok(r) => r,
-        Err(e) => {
-            log::error!("Cannot get recipients in hub#{}: {e}", hub.id);
-            Vec::new()
-        }
-    };
+    let recipients = repo.list_not_replied_email_recipients(hub.id)?;
 
     log::info!(
         "Found {} recipients for the startup check in hub#{}",
@@ -173,7 +172,7 @@ pub fn monitor_hub(repo: DieselRepository, hub: Hub, domain: String, zmq_sender:
         }
     }
 
-    if let Err(e) = session.logout() {
-        log::error!("Cannot logout from hub#{}: {e}", hub.id);
-    }
+    session.logout()?;
+
+    Ok(())
 }
