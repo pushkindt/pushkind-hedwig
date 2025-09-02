@@ -31,3 +31,4 @@ diesel = { version = "2.2.12", features = [
     "returning_clauses_for_sqlite_3_35",
 ] }
 chrono = { version = "0.4.41", features = ["serde"] }
+html2text = "0.15.3"
