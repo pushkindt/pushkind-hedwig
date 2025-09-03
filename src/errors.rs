@@ -17,15 +17,16 @@ pub enum Error {
 
     /// Errors originating from IMAP operations.
     #[error("imap error: {0}")]
-    Imap(#[from] imap::Error),
+    Imap(#[from] async_imap::error::Error),
 
     /// Errors originating from ZeroMQ operations.
     #[error("zmq error: {0}")]
     Zmq(#[from] zmq::Error),
 
     /// TLS failures while establishing secure connections.
+    /// Currently unused with rustls flow but kept for parity.
     #[error("tls error: {0}")]
-    Tls(#[from] native_tls::Error),
+    Tls(#[from] tokio_rustls::rustls::Error),
 
     /// Persistence layer failures.
     #[error("repository error: {0}")]

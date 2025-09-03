@@ -18,9 +18,8 @@ pub async fn run(database_url: &str, domain: &str, zmq_address: &str) -> Result<
     let db_pool = establish_connection_pool(database_url)?;
     let repo = DieselRepository::new(db_pool);
 
-    let zmq_sender = Arc::new(ZmqSender::start(ZmqSenderOptions::pub_default(
-        zmq_address,
-    ))?);
+    let zmq_sender = ZmqSender::start(ZmqSenderOptions::pub_default(zmq_address))?;
+    let zmq_sender = Arc::new(zmq_sender);
 
     let domain = Arc::new(domain.to_owned());
     let hubs = repo.list_hubs()?;

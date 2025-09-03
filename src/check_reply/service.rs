@@ -1,9 +1,12 @@
 use std::str;
 
+use async_imap::Session;
 use pushkind_common::domain::emailer::email::{EmailRecipient, UpdateEmailRecipient};
 use pushkind_common::domain::emailer::hub::Hub;
 use pushkind_common::models::emailer::zmq::ZMQReplyMessage;
 use pushkind_common::zmq::ZmqSender;
+use tokio::net::TcpStream;
+use tokio_rustls::client::TlsStream;
 
 use crate::errors::Error;
 use crate::repository::{DieselRepository, EmailReader, EmailWriter};
@@ -45,13 +48,13 @@ pub async fn process_reply(
 
 pub async fn process_new_message(
     repo: &DieselRepository,
-    session: &mut imap::Session<impl std::io::Read + std::io::Write>,
+    session: &mut Session<TlsStream<TcpStream>>,
     uid: u32,
     domain: &str,
     hub_id: i32,
     zmq_sender: &ZmqSender,
 ) {
-    let fetches = match session.uid_fetch(uid.to_string(), "RFC822.HEADER") {
+    let fetches = match session.uid_fetch(uid.to_string(), "RFC822.HEADER").await {
         Ok(f) => f,
         Err(e) => {
             log::error!("Cannot fetch header for UID {uid}: {e}");
@@ -78,7 +81,9 @@ pub async fn process_new_message(
     };
 
     if let Some(recipient_id) = extract_recipient_id(header_str, domain) {
-        let reply = fetch_message_body(session, uid).map(|b| extract_plain_reply(&b));
+        let reply = fetch_message_body(session, uid)
+            .await
+            .map(|b| extract_plain_reply(&b));
         match repo.get_email_recipient_by_id(recipient_id, hub_id) {
             Ok(Some(recipient)) => process_reply(repo, hub_id, &recipient, reply, zmq_sender).await,
             Ok(None) => log::warn!(
@@ -115,7 +120,7 @@ pub async fn monitor_hub(
             }
         };
 
-    let mut session = init_session(imap_server, imap_port, username, password)?;
+    let mut session = init_session(imap_server, imap_port, username, password).await?;
 
     let recipients = repo.list_not_replied_email_recipients(hub.id)?;
 
@@ -127,7 +132,7 @@ pub async fn monitor_hub(
     for recipient in recipients {
         let in_reply_to_id = format!("<{}@{}>", recipient.id, domain);
         let query = format!("HEADER In-Reply-To {in_reply_to_id}");
-        let search_result = match session.uid_search(&query) {
+        let search_result = match session.uid_search(&query).await {
             Ok(res) => res,
             Err(e) => {
                 log::error!("Cannot search for emails in hub#{}: {e}", hub.id);
@@ -136,28 +141,39 @@ pub async fn monitor_hub(
         };
 
         if let Some(uid) = search_result.iter().max() {
-            let reply = fetch_message_body(&mut session, *uid).map(|b| extract_plain_reply(&b));
+            let reply = fetch_message_body(&mut session, *uid)
+                .await
+                .map(|b| extract_plain_reply(&b));
             process_reply(&repo, hub.id, &recipient, reply, zmq_sender).await;
         }
     }
 
     let mut last_uid = session
         .uid_search("ALL")
+        .await
         .ok()
         .and_then(|uids| uids.into_iter().max())
         .unwrap_or(0);
 
     log::info!("Starting a monitoring loop for hub#{}", hub.id);
     loop {
-        if let Err(e) = session.idle().and_then(|idle| idle.wait_keepalive()) {
-            log::error!("Idle error in hub#{}: {e}", hub.id);
-            // Treat idle errors as fatal to allow the caller to restart the job
-            let _ = session.logout();
-            return Err(e.into());
+        match session.idle().await {
+            Ok(mut idle) => {
+                if let Err(e) = idle.wait_keepalive().await {
+                    log::error!("Idle error in hub#{}: {e}", hub.id);
+                    let _ = session.logout().await;
+                    return Err(e.into());
+                }
+            }
+            Err(e) => {
+                log::error!("Idle start error in hub#{}: {e}", hub.id);
+                let _ = session.logout().await;
+                return Err(e.into());
+            }
         }
 
         let search_query = format!("UID {}:*", last_uid + 1);
-        let new_uids = match session.uid_search(&search_query) {
+        let new_uids = match session.uid_search(&search_query).await {
             Ok(uids) => uids,
             Err(e) => {
                 log::error!("Cannot search new emails in hub#{}: {e}", hub.id);
