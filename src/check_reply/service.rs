@@ -1,6 +1,7 @@
 use std::str;
 
 use async_imap::Session;
+use futures::StreamExt;
 use pushkind_common::domain::emailer::email::{EmailRecipient, UpdateEmailRecipient};
 use pushkind_common::domain::emailer::hub::Hub;
 use pushkind_common::models::emailer::zmq::ZMQReplyMessage;
@@ -54,7 +55,7 @@ pub async fn process_new_message(
     hub_id: i32,
     zmq_sender: &ZmqSender,
 ) {
-    let fetches = match session.uid_fetch(uid.to_string(), "RFC822.HEADER").await {
+    let mut fetches = match session.uid_fetch(uid.to_string(), "RFC822.HEADER").await {
         Ok(f) => f,
         Err(e) => {
             log::error!("Cannot fetch header for UID {uid}: {e}");
@@ -62,10 +63,15 @@ pub async fn process_new_message(
         }
     };
 
-    let fetch = match fetches.iter().next() {
-        Some(f) => f,
+    let fetch = match fetches.next().await {
+        Some(Ok(f)) => f,
+        Some(Err(e)) => {
+            log::error!("Cannot fetch header for UID {uid}: {e}");
+            return;
+        }
         None => return,
     };
+    drop(fetches);
 
     let header = match fetch.header() {
         Some(h) => h,
@@ -157,20 +163,25 @@ pub async fn monitor_hub(
 
     log::info!("Starting a monitoring loop for hub#{}", hub.id);
     loop {
-        match session.idle().await {
-            Ok(mut idle) => {
-                if let Err(e) = idle.wait_keepalive().await {
-                    log::error!("Idle error in hub#{}: {e}", hub.id);
-                    let _ = session.logout().await;
-                    return Err(e.into());
-                }
-            }
+        let mut idle = session.idle();
+        if let Err(e) = idle.init().await {
+            log::error!("Idle start error in hub#{}: {e}", hub.id);
+            let _ = idle.done().await; // attempt to recover
+            return Err(e.into());
+        }
+        let (wait, _stop) = idle.wait();
+        if let Err(e) = wait.await {
+            log::error!("Idle error in hub#{}: {e}", hub.id);
+            let _ = idle.done().await;
+            return Err(e.into());
+        }
+        session = match idle.done().await {
+            Ok(s) => s,
             Err(e) => {
-                log::error!("Idle start error in hub#{}: {e}", hub.id);
-                let _ = session.logout().await;
+                log::error!("Idle done error in hub#{}: {e}", hub.id);
                 return Err(e.into());
             }
-        }
+        };
 
         let search_query = format!("UID {}:*", last_uid + 1);
         let new_uids = match session.uid_search(&search_query).await {
