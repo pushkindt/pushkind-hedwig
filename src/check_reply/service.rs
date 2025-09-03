@@ -1,0 +1,222 @@
+use std::str;
+
+use async_imap::Session;
+use futures::StreamExt;
+use pushkind_common::domain::emailer::email::{EmailRecipient, UpdateEmailRecipient};
+use pushkind_common::domain::emailer::hub::Hub;
+use pushkind_common::models::emailer::zmq::ZMQReplyMessage;
+use pushkind_common::zmq::ZmqSender;
+use tokio::net::TcpStream;
+use tokio::time::{Duration, sleep};
+use tokio_rustls::client::TlsStream;
+
+use crate::errors::Error;
+use crate::repository::{DieselRepository, EmailReader, EmailWriter};
+
+use super::imap::{fetch_message_body, init_session};
+use super::parser::{extract_plain_reply, extract_recipient_id};
+
+pub async fn process_reply(
+    repo: &DieselRepository,
+    hub_id: i32,
+    recipient: &EmailRecipient,
+    reply: Option<String>,
+    zmq_sender: &ZmqSender,
+) {
+    let msg = ZMQReplyMessage {
+        hub_id,
+        email: recipient.address.clone(),
+        message: reply.clone().unwrap_or_default(),
+    };
+    if let Err(e) = zmq_sender.send_json(&msg).await {
+        log::error!("Cannot send ZMQ message: {e}");
+    } else {
+        log::info!("ZMQ message sent for email id: {}", recipient.email_id);
+    }
+    if let Err(e) = repo.update_recipient(
+        recipient.id,
+        &UpdateEmailRecipient {
+            is_sent: Some(true),
+            replied: Some(true),
+            opened: Some(true),
+            reply,
+        },
+    ) {
+        log::error!("Cannot set email recipient replied status: {e}");
+    } else {
+        log::info!("Email recipient replied status set for {}", recipient.id);
+    }
+}
+
+pub async fn process_new_message(
+    repo: &DieselRepository,
+    session: &mut Session<TlsStream<TcpStream>>,
+    uid: u32,
+    domain: &str,
+    hub_id: i32,
+    zmq_sender: &ZmqSender,
+) {
+    let mut fetches = match session.uid_fetch(uid.to_string(), "RFC822.HEADER").await {
+        Ok(f) => f,
+        Err(e) => {
+            log::error!("Cannot fetch header for UID {uid}: {e}");
+            return;
+        }
+    };
+
+    let fetch = match fetches.next().await {
+        Some(Ok(f)) => f,
+        Some(Err(e)) => {
+            log::error!("Cannot fetch header for UID {uid}: {e}");
+            return;
+        }
+        None => return,
+    };
+    drop(fetches);
+
+    let header = match fetch.header() {
+        Some(h) => h,
+        None => return,
+    };
+
+    let header_str = match str::from_utf8(header) {
+        Ok(s) => s,
+        Err(e) => {
+            log::error!("Cannot parse header utf8: {e}");
+            return;
+        }
+    };
+
+    if let Some(recipient_id) = extract_recipient_id(header_str, domain) {
+        let reply = fetch_message_body(session, uid)
+            .await
+            .map(|b| extract_plain_reply(&b));
+        match repo.get_email_recipient_by_id(recipient_id, hub_id) {
+            Ok(Some(recipient)) => process_reply(repo, hub_id, &recipient, reply, zmq_sender).await,
+            Ok(None) => log::warn!(
+                "Recipient not found for id {} in hub#{}",
+                recipient_id,
+                hub_id,
+            ),
+            Err(e) => log::error!(
+                "Failed to load recipient id {} in hub#{}: {}",
+                recipient_id,
+                hub_id,
+                e,
+            ),
+        }
+    }
+}
+
+pub async fn monitor_hub(
+    repo: DieselRepository,
+    hub: Hub,
+    domain: String,
+    zmq_sender: &ZmqSender,
+) -> Result<(), Error> {
+    let (imap_server, imap_port, username, password) =
+        match (&hub.imap_server, hub.imap_port, &hub.login, &hub.password) {
+            (Some(server), Some(port), Some(username), Some(password)) => {
+                (server, port as u16, username, password)
+            }
+            _ => {
+                return Err(Error::Config(format!(
+                    "Cannot get imap server and port for the hub#{}",
+                    hub.id
+                )));
+            }
+        };
+
+    let mut session = init_session(imap_server, imap_port, username, password).await?;
+
+    let recipients = repo.list_not_replied_email_recipients(hub.id)?;
+
+    log::info!(
+        "Found {} recipients for the startup check in hub#{}",
+        recipients.len(),
+        hub.id,
+    );
+    for recipient in recipients {
+        let in_reply_to_id = format!("<{}@{}>", recipient.id, domain);
+        let query = format!("HEADER In-Reply-To {in_reply_to_id}");
+        let search_result = match session.uid_search(&query).await {
+            Ok(res) => res,
+            Err(e) => {
+                log::error!("Cannot search for emails in hub#{}: {e}", hub.id);
+                continue;
+            }
+        };
+
+        if let Some(uid) = search_result.iter().max() {
+            let reply = fetch_message_body(&mut session, *uid)
+                .await
+                .map(|b| extract_plain_reply(&b));
+            process_reply(&repo, hub.id, &recipient, reply, zmq_sender).await;
+        }
+    }
+
+    let mut last_uid = session
+        .uid_search("ALL")
+        .await
+        .ok()
+        .and_then(|uids| uids.into_iter().max())
+        .unwrap_or(0);
+
+    log::info!("Starting a monitoring loop for hub#{}", hub.id);
+    loop {
+        let mut idle = session.idle();
+        if let Err(e) = idle.init().await {
+            log::error!("Idle start error in hub#{}: {e}", hub.id);
+            let _ = idle.done().await; // attempt to recover
+            return Err(e.into());
+        }
+        let (wait, stop) = idle.wait();
+        let keepalive = tokio::spawn(async move {
+            sleep(Duration::from_secs(60 * 29)).await;
+            drop(stop);
+        });
+
+        if let Err(e) = wait.await {
+            if let async_imap::error::Error::Io(ref io_err) = e {
+                if io_err.kind() == std::io::ErrorKind::TimedOut {
+                    // keepalive triggered; not a fatal error
+                } else {
+                    log::error!("Idle error in hub#{}: {e}", hub.id);
+                    let _ = idle.done().await;
+                    return Err(e.into());
+                }
+            } else {
+                log::error!("Idle error in hub#{}: {e}", hub.id);
+                let _ = idle.done().await;
+                return Err(e.into());
+            }
+        }
+
+        keepalive.abort();
+        let _ = keepalive.await;
+        session = match idle.done().await {
+            Ok(s) => s,
+            Err(e) => {
+                log::error!("Idle done error in hub#{}: {e}", hub.id);
+                return Err(e.into());
+            }
+        };
+
+        let search_query = format!("UID {}:*", last_uid + 1);
+        let new_uids = match session.uid_search(&search_query).await {
+            Ok(uids) => uids,
+            Err(e) => {
+                log::error!("Cannot search new emails in hub#{}: {e}", hub.id);
+                continue;
+            }
+        };
+
+        for uid in &new_uids {
+            process_new_message(&repo, &mut session, *uid, &domain, hub.id, zmq_sender).await;
+        }
+
+        if let Some(max_uid) = new_uids.iter().max() {
+            last_uid = *max_uid;
+        }
+    }
+}
