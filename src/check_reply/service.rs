@@ -7,6 +7,7 @@ use pushkind_common::domain::emailer::hub::Hub;
 use pushkind_common::models::emailer::zmq::ZMQReplyMessage;
 use pushkind_common::zmq::ZmqSender;
 use tokio::net::TcpStream;
+use tokio::time::{Duration, sleep};
 use tokio_rustls::client::TlsStream;
 
 use crate::errors::Error;
@@ -169,12 +170,30 @@ pub async fn monitor_hub(
             let _ = idle.done().await; // attempt to recover
             return Err(e.into());
         }
-        let (wait, _stop) = idle.wait();
+        let (wait, stop) = idle.wait();
+        let keepalive = tokio::spawn(async move {
+            sleep(Duration::from_secs(60 * 29)).await;
+            drop(stop);
+        });
+
         if let Err(e) = wait.await {
-            log::error!("Idle error in hub#{}: {e}", hub.id);
-            let _ = idle.done().await;
-            return Err(e.into());
+            if let async_imap::error::Error::Io(ref io_err) = e {
+                if io_err.kind() == std::io::ErrorKind::TimedOut {
+                    // keepalive triggered; not a fatal error
+                } else {
+                    log::error!("Idle error in hub#{}: {e}", hub.id);
+                    let _ = idle.done().await;
+                    return Err(e.into());
+                }
+            } else {
+                log::error!("Idle error in hub#{}: {e}", hub.id);
+                let _ = idle.done().await;
+                return Err(e.into());
+            }
         }
+
+        keepalive.abort();
+        let _ = keepalive.await;
         session = match idle.done().await {
             Ok(s) => s,
             Err(e) => {
