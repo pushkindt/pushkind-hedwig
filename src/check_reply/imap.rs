@@ -1,4 +1,5 @@
 use async_imap::{Client, Session};
+use futures::StreamExt;
 use std::sync::Arc;
 use tokio::net::TcpStream;
 use tokio_rustls::TlsConnector;
@@ -9,7 +10,7 @@ use crate::errors::Error;
 
 /// Establish an IMAP session and select the INBOX.
 pub async fn init_session(
-    imap_server: &'static str,
+    imap_server: &str,
     imap_port: u16,
     username: &str,
     password: &str,
@@ -34,6 +35,7 @@ pub async fn init_session(
         })?;
     // SNI / server name for TLS
     let server_name = imap_server
+        .to_owned()
         .try_into()
         .map_err(|_| Error::Config(format!("Invalid DNS name for SNI: {imap_server}")))?;
 
@@ -41,7 +43,7 @@ pub async fn init_session(
     let tls_stream = tls_connector
         .connect(server_name, tcp)
         .await
-        .map_err(|_| Error::Config(format!("Can't connect to the imap server")))?;
+        .map_err(|_| Error::Config("Can't connect to the imap server".to_string()))?;
 
     // Hand the TLS stream to async-imap
     let client = Client::new(tls_stream);
@@ -58,7 +60,7 @@ pub async fn fetch_message_body(
     session: &mut Session<TlsStream<TcpStream>>,
     uid: u32,
 ) -> Option<String> {
-    let fetches = match session.uid_fetch(uid.to_string(), "RFC822.TEXT").await {
+    let mut fetches = match session.uid_fetch(uid.to_string(), "RFC822.TEXT").await {
         Ok(f) => f,
         Err(e) => {
             log::error!("Cannot fetch body for UID {uid}: {e}");
@@ -66,7 +68,15 @@ pub async fn fetch_message_body(
         }
     };
 
-    let fetch = fetches.iter().next()?;
+    let fetch = match fetches.next().await {
+        Some(Ok(f)) => f,
+        Some(Err(e)) => {
+            log::error!("Cannot fetch body for UID {uid}: {e}");
+            return None;
+        }
+        None => return None,
+    };
+
     let body = fetch.text().or_else(|| fetch.body())?;
 
     match std::str::from_utf8(body) {

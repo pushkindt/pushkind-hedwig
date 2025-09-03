@@ -1,11 +1,13 @@
 use std::str;
 
 use async_imap::Session;
+use futures::StreamExt;
 use pushkind_common::domain::emailer::email::{EmailRecipient, UpdateEmailRecipient};
 use pushkind_common::domain::emailer::hub::Hub;
 use pushkind_common::models::emailer::zmq::ZMQReplyMessage;
 use pushkind_common::zmq::ZmqSender;
 use tokio::net::TcpStream;
+use tokio::time::{Duration, sleep};
 use tokio_rustls::client::TlsStream;
 
 use crate::errors::Error;
@@ -54,7 +56,7 @@ pub async fn process_new_message(
     hub_id: i32,
     zmq_sender: &ZmqSender,
 ) {
-    let fetches = match session.uid_fetch(uid.to_string(), "RFC822.HEADER").await {
+    let mut fetches = match session.uid_fetch(uid.to_string(), "RFC822.HEADER").await {
         Ok(f) => f,
         Err(e) => {
             log::error!("Cannot fetch header for UID {uid}: {e}");
@@ -62,10 +64,15 @@ pub async fn process_new_message(
         }
     };
 
-    let fetch = match fetches.iter().next() {
-        Some(f) => f,
+    let fetch = match fetches.next().await {
+        Some(Ok(f)) => f,
+        Some(Err(e)) => {
+            log::error!("Cannot fetch header for UID {uid}: {e}");
+            return;
+        }
         None => return,
     };
+    drop(fetches);
 
     let header = match fetch.header() {
         Some(h) => h,
@@ -157,20 +164,43 @@ pub async fn monitor_hub(
 
     log::info!("Starting a monitoring loop for hub#{}", hub.id);
     loop {
-        match session.idle().await {
-            Ok(mut idle) => {
-                if let Err(e) = idle.wait_keepalive().await {
+        let mut idle = session.idle();
+        if let Err(e) = idle.init().await {
+            log::error!("Idle start error in hub#{}: {e}", hub.id);
+            let _ = idle.done().await; // attempt to recover
+            return Err(e.into());
+        }
+        let (wait, stop) = idle.wait();
+        let keepalive = tokio::spawn(async move {
+            sleep(Duration::from_secs(60 * 29)).await;
+            drop(stop);
+        });
+
+        if let Err(e) = wait.await {
+            if let async_imap::error::Error::Io(ref io_err) = e {
+                if io_err.kind() == std::io::ErrorKind::TimedOut {
+                    // keepalive triggered; not a fatal error
+                } else {
                     log::error!("Idle error in hub#{}: {e}", hub.id);
-                    let _ = session.logout().await;
+                    let _ = idle.done().await;
                     return Err(e.into());
                 }
-            }
-            Err(e) => {
-                log::error!("Idle start error in hub#{}: {e}", hub.id);
-                let _ = session.logout().await;
+            } else {
+                log::error!("Idle error in hub#{}: {e}", hub.id);
+                let _ = idle.done().await;
                 return Err(e.into());
             }
         }
+
+        keepalive.abort();
+        let _ = keepalive.await;
+        session = match idle.done().await {
+            Ok(s) => s,
+            Err(e) => {
+                log::error!("Idle done error in hub#{}: {e}", hub.id);
+                return Err(e.into());
+            }
+        };
 
         let search_query = format!("UID {}:*", last_uid + 1);
         let new_uids = match session.uid_search(&search_query).await {

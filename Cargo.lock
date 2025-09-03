@@ -1925,6 +1925,7 @@ dependencies = [
  "diesel",
  "dotenvy",
  "env_logger",
+ "futures",
  "html2text",
  "log",
  "mail-send",
