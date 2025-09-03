@@ -20,9 +20,11 @@ pub async fn init_session(
         roots: webpki_roots::TLS_SERVER_ROOTS.into(),
     };
 
-    let tls_config = ClientConfig::builder()
-        .with_root_certificates(root_store)
-        .with_no_client_auth();
+    let tls_config =
+        ClientConfig::builder_with_provider(rustls::crypto::aws_lc_rs::default_provider().into())
+            .with_safe_default_protocol_versions()?
+            .with_root_certificates(root_store)
+            .with_no_client_auth();
     let tls_connector = TlsConnector::from(Arc::new(tls_config));
 
     // TCP connect
