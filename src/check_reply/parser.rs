@@ -84,7 +84,27 @@ pub fn extract_recipient_id(header: &str, domain: &str) -> Option<i32> {
 }
 
 #[cfg(test)]
-mod tests {
+mod strip_html_tags_tests {
+    use super::*;
+
+    #[test]
+    fn removes_tags_and_handles_malformed_html() {
+        assert_eq!(strip_html_tags("<div><p>Hello</p></div>").trim(), "Hello");
+        assert_eq!(strip_html_tags("<div><p>Hello").trim(), "Hello");
+    }
+
+    #[test]
+    fn handles_empty_and_multiple_tags() {
+        assert_eq!(strip_html_tags("").trim(), "");
+        assert_eq!(
+            strip_html_tags("<p>First</p><p>Second</p>").trim(),
+            "First\n\nSecond"
+        );
+    }
+}
+
+#[cfg(test)]
+mod extract_plain_reply_tests {
     use super::*;
 
     #[test]
@@ -94,8 +114,35 @@ mod tests {
     }
 
     #[test]
-    fn ignores_quoted_sections() {
-        let html = "<div>Thanks!</div><div><br></div><div>On Tue, Someone wrote:</div><blockquote><div>Original</div></blockquote>";
+    fn ignores_quoted_lines_and_separators() {
+        let html = "<div>Thanks!</div><div><br></div><div>> quoted</div><div>On Tue, Someone wrote:</div><blockquote><div>Original</div></blockquote>";
         assert_eq!(extract_plain_reply(html), "Thanks!");
+    }
+
+    #[test]
+    fn handles_empty_input() {
+        assert_eq!(extract_plain_reply(""), "");
+    }
+}
+
+#[cfg(test)]
+mod extract_recipient_id_tests {
+    use super::*;
+
+    #[test]
+    fn extracts_id_from_valid_header() {
+        let header = "Subject: hi\nIn-Reply-To: <42@example.com>\n";
+        assert_eq!(extract_recipient_id(header, "example.com"), Some(42));
+    }
+
+    #[test]
+    fn returns_none_for_invalid_header() {
+        let wrong_domain = "In-Reply-To: <42@other.com>\n";
+        assert_eq!(extract_recipient_id(wrong_domain, "example.com"), None);
+
+        let non_int = "In-Reply-To: <abc@example.com>\n";
+        assert_eq!(extract_recipient_id(non_int, "example.com"), None);
+
+        assert_eq!(extract_recipient_id("", "example.com"), None);
     }
 }
