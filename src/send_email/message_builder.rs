@@ -66,3 +66,92 @@ pub fn build_message<'a>(
 
     message
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Utc;
+
+    fn sample_hub() -> Hub {
+        Hub {
+            id: 1,
+            login: Some("sender@example.com".into()),
+            password: None,
+            sender: Some("sender@example.com".into()),
+            smtp_server: None,
+            smtp_port: None,
+            created_at: None,
+            updated_at: None,
+            imap_server: None,
+            imap_port: None,
+            email_template: Some("Hi {name}! {message}".into()),
+        }
+    }
+
+    fn sample_email() -> Email {
+        Email {
+            id: 1,
+            message: "Hello".into(),
+            created_at: Utc::now().naive_utc(),
+            is_sent: false,
+            subject: Some("Subject".into()),
+            attachment: None,
+            attachment_name: None,
+            attachment_mime: None,
+            num_sent: 0,
+            num_opened: 0,
+            num_replied: 0,
+            hub_id: 1,
+        }
+    }
+
+    fn sample_recipient() -> EmailRecipient {
+        EmailRecipient {
+            id: 1,
+            email_id: 1,
+            address: "to@example.com".into(),
+            opened: false,
+            updated_at: Utc::now().naive_utc(),
+            is_sent: false,
+            replied: false,
+            name: Some("Alice".into()),
+            reply: None,
+        }
+    }
+
+    #[test]
+    fn builds_message_with_tracking_and_unsubscribe() {
+        let hub = sample_hub();
+        let email = sample_email();
+        let recipient = sample_recipient();
+        let builder = build_message(&hub, &email, &recipient, "example.com");
+
+        let mut out = Vec::new();
+        builder.write_to(&mut out).unwrap();
+        let msg = String::from_utf8(out).unwrap();
+
+        assert!(msg.contains("List-Unsubscribe: <mailto:sender@example.com?subject=unsubscribe>"));
+        assert!(msg.contains("track/1"));
+        assert!(msg.contains("Message-ID: <1@example.com>"));
+        assert!(msg.contains("Hi Alice! Hello"));
+    }
+
+    #[test]
+    fn includes_attachment_when_provided() {
+        let hub = sample_hub();
+        let mut email = sample_email();
+        email.attachment = Some(b"data".to_vec());
+        email.attachment_name = Some("file.txt".into());
+        email.attachment_mime = Some("text/plain".into());
+        let recipient = sample_recipient();
+
+        let builder = build_message(&hub, &email, &recipient, "example.com");
+
+        let mut out = Vec::new();
+        builder.write_to(&mut out).unwrap();
+        let msg = String::from_utf8(out).unwrap();
+
+        assert!(msg.contains("Content-Type: text/plain"));
+        assert!(msg.contains("name=\"file.txt\""));
+    }
+}
