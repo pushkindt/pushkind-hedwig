@@ -2,10 +2,25 @@ use mail_send::mail_builder::{
     MessageBuilder,
     headers::{HeaderType, url::URL},
 };
+use once_cell::sync::Lazy;
 use pushkind_common::domain::emailer::email::{Email, EmailRecipient};
 use pushkind_common::domain::emailer::hub::Hub;
+use regex::Regex;
 use std::collections::HashMap;
-use tinytemplate::TinyTemplate;
+
+/// Replace {key} with values from `vars`; leave unknown {key} intact.
+static PLACEHOLDER_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"\{([A-Za-z0-9_]+)\}").unwrap());
+
+fn fill_template(template: &str, vars: &HashMap<String, String>) -> String {
+    PLACEHOLDER_RE
+        .replace_all(template, |caps: &regex::Captures| {
+            let key = &caps[1];
+            vars.get(key)
+                .cloned()
+                .unwrap_or_else(|| caps[0].to_string())
+        })
+        .into_owned()
+}
 
 /// Builds an email message ready to be sent via SMTP.
 ///
@@ -18,17 +33,10 @@ pub fn build_message<'a>(
     recipient: &'a EmailRecipient,
     domain: &'a str,
 ) -> MessageBuilder<'a> {
-    // Render the email message template using recipient fields
-    let mut message_tt = TinyTemplate::new();
-    let rendered_message = match message_tt.add_template("message", &email.message) {
-        Ok(()) => match message_tt.render("message", &recipient.fields) {
-            Ok(message) => message,
-            Err(_) => email.message.clone(),
-        },
-        Err(_) => email.message.clone(),
-    };
+    // 1) Render the inner message with recipient fields
+    let rendered_message = fill_template(&email.message, &recipient.fields);
 
-    // Render the hub template with recipient data and rendered message
+    // 2) Ensure outer template has {message}
     let template = hub.email_template.as_deref().unwrap_or("{message}");
     let template = match template.contains("{message}") {
         true => template.to_string(),
@@ -39,20 +47,15 @@ pub fn build_message<'a>(
         }
     };
 
+    // 3) Build fields for the outer template
     let unsubscribe_url = hub.unsubscribe_url();
     let mut fields: HashMap<String, String> = HashMap::new();
     fields.insert("name".into(), recipient.name.clone());
     fields.insert("unsubscribe_url".into(), unsubscribe_url.clone());
     fields.insert("message".into(), rendered_message);
 
-    let mut tt = TinyTemplate::new();
-    let mut body = match tt.add_template("body", &template) {
-        Ok(()) => match tt.render("body", &fields) {
-            Ok(body) => body,
-            Err(_) => template.to_string(),
-        },
-        Err(_) => template.to_string(),
-    };
+    // 4) Render outer template (known keys get replaced; unknown stay intact)
+    let mut body = fill_template(&template, &fields);
 
     body.push_str(&format!(
         r#"<img height="1" width="1" border="0" src="https://mail.{domain}/track/{}">"#,
@@ -115,7 +118,7 @@ mod tests {
     fn sample_email() -> Email {
         Email {
             id: 1,
-            message: "Hello {favorite_color}".into(),
+            message: "Hello {favorite_color}, I have {favourite fruit}".into(),
             created_at: Utc::now().naive_utc(),
             is_sent: false,
             subject: Some("Subject".into()),
@@ -161,7 +164,7 @@ mod tests {
         assert!(msg.contains("List-Unsubscribe: <mailto:sender@example.com?subject=unsubscribe>"));
         assert!(msg.contains("track/1"));
         assert!(msg.contains("Message-ID: <1@example.com>"));
-        assert!(msg.contains("Hi Alice! Hello blue"));
+        assert!(msg.contains("Hi Alice! Hello blue, I have {favourite fruit}"));
         assert!(msg.contains("unsubscribe"));
     }
 
