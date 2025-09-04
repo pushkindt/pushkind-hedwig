@@ -22,7 +22,7 @@ pub fn build_message<'a>(
     let unsubscribe_url = hub.unsubscribe_url();
 
     let mut fields: HashMap<String, String> = HashMap::new();
-    fields.insert("name".into(), recipient.name.clone().unwrap_or_default());
+    fields.insert("name".into(), recipient.name.clone());
     fields.insert("unsubscribe_url".into(), unsubscribe_url.clone());
 
     let mut tt = TinyTemplate::new();
@@ -123,7 +123,8 @@ mod tests {
             updated_at: Utc::now().naive_utc(),
             is_sent: false,
             replied: false,
-            name: Some("Alice".into()),
+            name: "Alice".into(),
+            fields: HashMap::new(),
             reply: None,
         }
     }

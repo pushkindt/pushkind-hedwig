@@ -99,9 +99,12 @@ where
 mod tests {
     use super::*;
     use async_trait::async_trait;
-    use std::sync::{
-        Arc,
-        atomic::{AtomicUsize, Ordering},
+    use std::{
+        collections::HashMap,
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        },
     };
 
     use crate::repository::DieselRepository;
@@ -175,7 +178,8 @@ mod tests {
             hub_id: 1,
             recipients: vec![NewEmailRecipient {
                 address: "to@example.com".into(),
-                name: None,
+                name: "".to_string(),
+                fields: HashMap::new(),
             }],
         };
         let stored = repo.create_email(&new_email).unwrap();

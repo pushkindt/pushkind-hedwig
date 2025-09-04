@@ -98,6 +98,7 @@ impl EmailWriter for DieselRepository {
                 .get_result(conn)?;
 
             for item in &email.recipients {
+                let fields = serde_json::to_string(&item.fields).unwrap_or_default();
                 let new_rec = DbNewEmailRecipient {
                     email_id: inserted.id,
                     address: &item.address,
@@ -105,7 +106,8 @@ impl EmailWriter for DieselRepository {
                     updated_at: created_at,
                     is_sent: false,
                     replied: false,
-                    name: item.name.as_deref(),
+                    name: &item.name,
+                    fields: &fields,
                 };
                 diesel::insert_into(email_recipients::table)
                     .values(&new_rec)

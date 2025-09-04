@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use diesel::{RunQueryDsl, connection::SimpleConnection};
 use pushkind_common::db::establish_connection_pool;
 use pushkind_common::domain::emailer::email::{NewEmail, NewEmailRecipient, UpdateEmailRecipient};
@@ -52,7 +54,8 @@ fn create_email(repo: &DieselRepository) -> (i32, i32) {
         hub_id: 1,
         recipients: vec![NewEmailRecipient {
             address: "to@example.com".into(),
-            name: Some("Alice".into()),
+            name: "Alice".into(),
+            fields: HashMap::new(),
         }],
     };
     let stored = repo.create_email(&new_email).unwrap();
