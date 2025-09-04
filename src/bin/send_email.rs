@@ -8,6 +8,8 @@ use pushkind_hedwig::send_email;
 async fn main() {
     env_logger::init_from_env(env_logger::Env::default().default_filter_or("info"));
     dotenv().ok();
+    rustls::crypto::CryptoProvider::install_default(rustls::crypto::aws_lc_rs::default_provider())
+        .expect("Could not install default crypto provider.");
 
     let database_url = env::var("DATABASE_URL").unwrap_or("app.db".to_string());
     let domain = env::var("DOMAIN").unwrap_or_default();
