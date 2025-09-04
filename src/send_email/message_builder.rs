@@ -9,7 +9,7 @@ use regex::Regex;
 use std::collections::HashMap;
 
 /// Replace {key} with values from `vars`; leave unknown {key} intact.
-static PLACEHOLDER_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"\{([A-Za-z0-9_]+)\}").unwrap());
+static PLACEHOLDER_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"\{([\p{L}\p{N}_]+?)\}").unwrap());
 
 fn fill_template(template: &str, vars: &HashMap<String, String>) -> String {
     PLACEHOLDER_RE
