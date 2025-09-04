@@ -20,13 +20,25 @@ pub fn build_message<'a>(
 ) -> MessageBuilder<'a> {
     // Render the email message template using recipient fields
     let mut message_tt = TinyTemplate::new();
-    let _ = message_tt.add_template("message", &email.message);
-    let rendered_message = message_tt
-        .render("message", &recipient.fields)
-        .unwrap_or_default();
+    let rendered_message = match message_tt.add_template("message", &email.message) {
+        Ok(()) => match message_tt.render("message", &recipient.fields) {
+            Ok(message) => message,
+            Err(_) => email.message.clone(),
+        },
+        Err(_) => email.message.clone(),
+    };
 
     // Render the hub template with recipient data and rendered message
     let template = hub.email_template.as_deref().unwrap_or("{message}");
+    let template = match template.contains("{message}") {
+        true => template.to_string(),
+        false => {
+            let mut template = template.to_string();
+            template.push_str("\n\n{message}");
+            template
+        }
+    };
+
     let unsubscribe_url = hub.unsubscribe_url();
     let mut fields: HashMap<String, String> = HashMap::new();
     fields.insert("name".into(), recipient.name.clone());
@@ -34,9 +46,13 @@ pub fn build_message<'a>(
     fields.insert("message".into(), rendered_message);
 
     let mut tt = TinyTemplate::new();
-    let _ = tt.add_template("body", template);
-
-    let mut body = tt.render("body", &fields).unwrap_or_default();
+    let mut body = match tt.add_template("body", &template) {
+        Ok(()) => match tt.render("body", &fields) {
+            Ok(body) => body,
+            Err(_) => template.to_string(),
+        },
+        Err(_) => template.to_string(),
+    };
 
     body.push_str(&format!(
         r#"<img height="1" width="1" border="0" src="https://mail.{domain}/track/{}">"#,
