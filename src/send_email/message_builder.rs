@@ -18,26 +18,25 @@ pub fn build_message<'a>(
     recipient: &'a EmailRecipient,
     domain: &'a str,
 ) -> MessageBuilder<'a> {
-    let template = hub.email_template.as_deref().unwrap_or_default();
-    let unsubscribe_url = hub.unsubscribe_url();
+    // Render the email message template using recipient fields
+    let mut message_tt = TinyTemplate::new();
+    let _ = message_tt.add_template("message", &email.message);
+    let rendered_message = message_tt
+        .render("message", &recipient.fields)
+        .unwrap_or_default();
 
+    // Render the hub template with recipient data and rendered message
+    let template = hub.email_template.as_deref().unwrap_or("{message}");
+    let unsubscribe_url = hub.unsubscribe_url();
     let mut fields: HashMap<String, String> = HashMap::new();
     fields.insert("name".into(), recipient.name.clone());
     fields.insert("unsubscribe_url".into(), unsubscribe_url.clone());
+    fields.insert("message".into(), rendered_message);
 
     let mut tt = TinyTemplate::new();
-    tt.add_template("body", template).expect("invalid template");
+    let _ = tt.add_template("body", template);
 
-    let mut body = if template.contains("{message}") {
-        fields.insert("message".into(), email.message.clone());
-        tt.render("body", &fields)
-            .expect("failed to render template")
-    } else {
-        let rendered = tt
-            .render("body", &fields)
-            .expect("failed to render template");
-        format!("{}{}", &email.message, rendered)
-    };
+    let mut body = tt.render("body", &fields).unwrap_or_default();
 
     body.push_str(&format!(
         r#"<img height="1" width="1" border="0" src="https://mail.{domain}/track/{}">"#,
@@ -93,14 +92,14 @@ mod tests {
             updated_at: None,
             imap_server: None,
             imap_port: None,
-            email_template: Some("Hi {name}! {message}".into()),
+            email_template: Some("Hi {name}! {message} Unsubscribe: {unsubscribe_url}".into()),
         }
     }
 
     fn sample_email() -> Email {
         Email {
             id: 1,
-            message: "Hello".into(),
+            message: "Hello {favorite_color}".into(),
             created_at: Utc::now().naive_utc(),
             is_sent: false,
             subject: Some("Subject".into()),
@@ -115,6 +114,9 @@ mod tests {
     }
 
     fn sample_recipient() -> EmailRecipient {
+        let mut fields = HashMap::new();
+        fields.insert("favorite_color".into(), "blue".into());
+
         EmailRecipient {
             id: 1,
             email_id: 1,
@@ -124,7 +126,7 @@ mod tests {
             is_sent: false,
             replied: false,
             name: "Alice".into(),
-            fields: HashMap::new(),
+            fields,
             reply: None,
         }
     }
@@ -143,7 +145,8 @@ mod tests {
         assert!(msg.contains("List-Unsubscribe: <mailto:sender@example.com?subject=unsubscribe>"));
         assert!(msg.contains("track/1"));
         assert!(msg.contains("Message-ID: <1@example.com>"));
-        assert!(msg.contains("Hi Alice! Hello"));
+        assert!(msg.contains("Hi Alice! Hello blue"));
+        assert!(msg.contains("unsubscribe"));
     }
 
     #[test]
