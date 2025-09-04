@@ -39,6 +39,7 @@ html2text = "0.15.3"
 thiserror = "2.0.16"
 async-trait = "0.1"
 futures = "0.3"
+tinytemplate = "1.2"
 
 [dev-dependencies]
 tempfile = "3"

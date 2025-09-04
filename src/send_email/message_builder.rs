@@ -4,6 +4,8 @@ use mail_send::mail_builder::{
 };
 use pushkind_common::domain::emailer::email::{Email, EmailRecipient};
 use pushkind_common::domain::emailer::hub::Hub;
+use std::collections::HashMap;
+use tinytemplate::TinyTemplate;
 
 /// Builds an email message ready to be sent via SMTP.
 ///
@@ -18,17 +20,24 @@ pub fn build_message<'a>(
 ) -> MessageBuilder<'a> {
     let template = hub.email_template.as_deref().unwrap_or_default();
     let unsubscribe_url = hub.unsubscribe_url();
-    let mut body: String;
 
-    let template = template
-        .replace("{unsubscribe_url}", &unsubscribe_url)
-        .replace("{name}", recipient.name.as_deref().unwrap_or_default());
+    let mut fields: HashMap<String, String> = HashMap::new();
+    fields.insert("name".into(), recipient.name.clone().unwrap_or_default());
+    fields.insert("unsubscribe_url".into(), unsubscribe_url.clone());
 
-    if template.contains("{message}") {
-        body = template.replace("{message}", &email.message);
+    let mut tt = TinyTemplate::new();
+    tt.add_template("body", template).expect("invalid template");
+
+    let mut body = if template.contains("{message}") {
+        fields.insert("message".into(), email.message.clone());
+        tt.render("body", &fields)
+            .expect("failed to render template")
     } else {
-        body = format!("{}{}", &email.message, template);
-    }
+        let rendered = tt
+            .render("body", &fields)
+            .expect("failed to render template");
+        format!("{}{}", &email.message, rendered)
+    };
 
     body.push_str(&format!(
         r#"<img height="1" width="1" border="0" src="https://mail.{domain}/track/{}">"#,
