@@ -4,6 +4,8 @@ use mail_send::mail_builder::{
 };
 use pushkind_common::domain::emailer::email::{Email, EmailRecipient};
 use pushkind_common::domain::emailer::hub::Hub;
+use std::collections::HashMap;
+use tinytemplate::TinyTemplate;
 
 /// Builds an email message ready to be sent via SMTP.
 ///
@@ -16,19 +18,41 @@ pub fn build_message<'a>(
     recipient: &'a EmailRecipient,
     domain: &'a str,
 ) -> MessageBuilder<'a> {
-    let template = hub.email_template.as_deref().unwrap_or_default();
+    // Render the email message template using recipient fields
+    let mut message_tt = TinyTemplate::new();
+    let rendered_message = match message_tt.add_template("message", &email.message) {
+        Ok(()) => match message_tt.render("message", &recipient.fields) {
+            Ok(message) => message,
+            Err(_) => email.message.clone(),
+        },
+        Err(_) => email.message.clone(),
+    };
+
+    // Render the hub template with recipient data and rendered message
+    let template = hub.email_template.as_deref().unwrap_or("{message}");
+    let template = match template.contains("{message}") {
+        true => template.to_string(),
+        false => {
+            let mut template = template.to_string();
+            template.push_str("\n\n{message}");
+            template
+        }
+    };
+
     let unsubscribe_url = hub.unsubscribe_url();
-    let mut body: String;
+    let mut fields: HashMap<String, String> = HashMap::new();
+    fields.insert("name".into(), recipient.name.clone());
+    fields.insert("unsubscribe_url".into(), unsubscribe_url.clone());
+    fields.insert("message".into(), rendered_message);
 
-    let template = template
-        .replace("{unsubscribe_url}", &unsubscribe_url)
-        .replace("{name}", recipient.name.as_deref().unwrap_or_default());
-
-    if template.contains("{message}") {
-        body = template.replace("{message}", &email.message);
-    } else {
-        body = format!("{}{}", &email.message, template);
-    }
+    let mut tt = TinyTemplate::new();
+    let mut body = match tt.add_template("body", &template) {
+        Ok(()) => match tt.render("body", &fields) {
+            Ok(body) => body,
+            Err(_) => template.to_string(),
+        },
+        Err(_) => template.to_string(),
+    };
 
     body.push_str(&format!(
         r#"<img height="1" width="1" border="0" src="https://mail.{domain}/track/{}">"#,
@@ -84,14 +108,14 @@ mod tests {
             updated_at: None,
             imap_server: None,
             imap_port: None,
-            email_template: Some("Hi {name}! {message}".into()),
+            email_template: Some("Hi {name}! {message} Unsubscribe: {unsubscribe_url}".into()),
         }
     }
 
     fn sample_email() -> Email {
         Email {
             id: 1,
-            message: "Hello".into(),
+            message: "Hello {favorite_color}".into(),
             created_at: Utc::now().naive_utc(),
             is_sent: false,
             subject: Some("Subject".into()),
@@ -106,6 +130,9 @@ mod tests {
     }
 
     fn sample_recipient() -> EmailRecipient {
+        let mut fields = HashMap::new();
+        fields.insert("favorite_color".into(), "blue".into());
+
         EmailRecipient {
             id: 1,
             email_id: 1,
@@ -114,7 +141,8 @@ mod tests {
             updated_at: Utc::now().naive_utc(),
             is_sent: false,
             replied: false,
-            name: Some("Alice".into()),
+            name: "Alice".into(),
+            fields,
             reply: None,
         }
     }
@@ -133,7 +161,8 @@ mod tests {
         assert!(msg.contains("List-Unsubscribe: <mailto:sender@example.com?subject=unsubscribe>"));
         assert!(msg.contains("track/1"));
         assert!(msg.contains("Message-ID: <1@example.com>"));
-        assert!(msg.contains("Hi Alice! Hello"));
+        assert!(msg.contains("Hi Alice! Hello blue"));
+        assert!(msg.contains("unsubscribe"));
     }
 
     #[test]

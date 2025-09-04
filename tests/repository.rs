@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use diesel::{RunQueryDsl, connection::SimpleConnection};
 use pushkind_common::db::establish_connection_pool;
 use pushkind_common::domain::emailer::email::{NewEmail, NewEmailRecipient, UpdateEmailRecipient};
@@ -15,7 +17,7 @@ fn setup_pool() -> (TempDir, pushkind_common::db::DbPool) {
         conn.batch_execute(
             "CREATE TABLE hubs (id INTEGER PRIMARY KEY, login TEXT, password TEXT, sender TEXT, smtp_server TEXT, smtp_port INTEGER, created_at TIMESTAMP, updated_at TIMESTAMP, imap_server TEXT, imap_port INTEGER, email_template TEXT);\n\
              CREATE TABLE emails (id INTEGER PRIMARY KEY, message TEXT NOT NULL, created_at TIMESTAMP NOT NULL, is_sent BOOL NOT NULL, subject TEXT, attachment BLOB, attachment_name TEXT, attachment_mime TEXT, num_sent INTEGER NOT NULL DEFAULT 0, num_opened INTEGER NOT NULL DEFAULT 0, num_replied INTEGER NOT NULL DEFAULT 0, hub_id INTEGER NOT NULL REFERENCES hubs(id));\n\
-             CREATE TABLE email_recipients (id INTEGER PRIMARY KEY, email_id INTEGER NOT NULL REFERENCES emails(id), address TEXT NOT NULL, opened BOOL NOT NULL, updated_at TIMESTAMP NOT NULL, is_sent BOOL NOT NULL, replied BOOL NOT NULL, name TEXT, reply TEXT);"
+             CREATE TABLE email_recipients (id INTEGER PRIMARY KEY, email_id INTEGER NOT NULL REFERENCES emails(id), address TEXT NOT NULL, opened BOOL NOT NULL, updated_at TIMESTAMP NOT NULL, is_sent BOOL NOT NULL, replied BOOL NOT NULL, name TEXT, fields TEXT, reply TEXT);"
         ).unwrap();
     }
     (dir, pool)
@@ -52,7 +54,8 @@ fn create_email(repo: &DieselRepository) -> (i32, i32) {
         hub_id: 1,
         recipients: vec![NewEmailRecipient {
             address: "to@example.com".into(),
-            name: Some("Alice".into()),
+            name: "Alice".into(),
+            fields: HashMap::new(),
         }],
     };
     let stored = repo.create_email(&new_email).unwrap();

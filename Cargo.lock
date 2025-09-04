@@ -1480,9 +1480,9 @@ dependencies = [
 
 [[package]]
 name = "log"
-version = "0.4.27"
+version = "0.4.28"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "13dc2df351e3202783a1fe0d44375f7295ffb4049267b0f3018346dc122a1d94"
+checksum = "34080505efa8e45a4b816c349525ebe327ceaa8559756f0356cba97ef3bf7432"
 
 [[package]]
 name = "loom"
@@ -1909,7 +1909,7 @@ dependencies = [
 [[package]]
 name = "pushkind-common"
 version = "0.1.0"
-source = "git+https://github.com/pushkindt/pushkind-common.git?branch=main#6a1256a9080047deaf583349e08f9c303ba4da51"
+source = "git+https://github.com/pushkindt/pushkind-common.git?branch=main#8ed47f938dfffe2c1203486b4c7683eaa4df2419"
 dependencies = [
  "chrono",
  "diesel",
@@ -1940,6 +1940,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "thiserror 2.0.16",
+ "tinytemplate",
  "tokio",
  "tokio-rustls",
  "webpki-roots",
@@ -2601,6 +2602,16 @@ checksum = "5d4f6d1145dcb577acf783d4e601bc1d76a13337bb54e6233add580b07344c8b"
 dependencies = [
  "displaydoc",
  "zerovec",
+]
+
+[[package]]
+name = "tinytemplate"
+version = "1.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "be4d6b5f19ff7664e8c98d03e2139cb510db9b0a60b55f8e8709b689d939b6bc"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
