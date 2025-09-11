@@ -1,4 +1,76 @@
+use base64::{Engine as _, engine::general_purpose};
 use html2text;
+
+/// Try to extract and decode a base64-encoded MIME part from the input.
+/// Returns the decoded string and whether the part is HTML.
+fn try_decode_base64_part(input: &str) -> Option<(String, bool)> {
+    // Work with lowercase for case-insensitive search without allocating too much
+    let lower = input.to_lowercase();
+    let needle = "content-transfer-encoding: base64";
+    let mut start_pos = 0usize;
+
+    while let Some(idx) = lower[start_pos..].find(needle) {
+        let header_pos = start_pos + idx;
+
+        // Find the start of headers for this part (previous blank line or start)
+        let headers_start = lower[..header_pos]
+            .rfind("\n\n")
+            .map(|p| p + 2)
+            .or_else(|| lower[..header_pos].rfind("\r\n\r\n").map(|p| p + 4))
+            .unwrap_or(0);
+
+        // Determine content type within headers region
+        let headers_slice = &lower[headers_start..header_pos];
+        let is_html = headers_slice.contains("content-type: text/html");
+
+        // Find the end of headers for this part (first blank line after header_pos)
+        let after_header = header_pos + needle.len();
+        let body_start = lower[after_header..]
+            .find("\n\n")
+            .map(|p| after_header + p + 2)
+            .or_else(|| {
+                lower[after_header..]
+                    .find("\r\n\r\n")
+                    .map(|p| after_header + p + 4)
+            });
+
+        let body_start = match body_start {
+            Some(p) => p,
+            None => {
+                // No body after header; try next occurrence
+                start_pos = after_header;
+                continue;
+            }
+        };
+
+        // Heuristically choose end of this part: either next boundary line starting with "--" or end of message
+        let boundary_rel = lower[body_start..]
+            .find("\n--")
+            .or_else(|| lower[body_start..].find("\r\n--"));
+        let body_end = boundary_rel.map(|p| body_start + p).unwrap_or(input.len());
+
+        let candidate = &input[body_start..body_end];
+
+        // Try to decode this candidate
+        // Base64 decoder from crate; strip whitespace to be tolerant of wrapped lines
+        let compact: String = candidate.chars().filter(|c| !c.is_whitespace()).collect();
+        match general_purpose::STANDARD.decode(compact.as_bytes()) {
+            Ok(bytes) => match String::from_utf8(bytes) {
+                Ok(s) => return Some((s, is_html)),
+                Err(_) => {
+                    // Not valid UTF-8; try next occurrence
+                }
+            },
+            Err(_) => {
+                // Not a valid base64 block; try next occurrence
+            }
+        }
+
+        start_pos = after_header;
+    }
+
+    None
+}
 
 /// Remove HTML tags from the input and return plain text.
 pub fn strip_html_tags(input: &str) -> String {
@@ -9,7 +81,18 @@ pub fn strip_html_tags(input: &str) -> String {
 
 /// Extract the user's reply from an HTML email body.
 pub fn extract_plain_reply(input: &str) -> String {
-    let sanitized = strip_html_tags(input);
+    // If the body contains base64-encoded part, try to decode and use it
+    let (maybe_decoded, is_html) = match try_decode_base64_part(input) {
+        Some((decoded, is_html)) => (decoded, is_html),
+        None => (input.to_string(), true), // assume html by default, html2text copes with plain text too
+    };
+
+    let sanitized = if is_html {
+        strip_html_tags(&maybe_decoded)
+    } else {
+        // Already plain text
+        maybe_decoded.clone()
+    };
     let normalized = sanitized.replace('\r', "");
     let mut result_lines = Vec::new();
     for line in normalized.lines() {
@@ -122,6 +205,20 @@ mod extract_plain_reply_tests {
     #[test]
     fn handles_empty_input() {
         assert_eq!(extract_plain_reply(""), "");
+    }
+
+    #[test]
+    fn decodes_base64_plain_text_part() {
+        // Simple MIME-like snippet with base64 plain text
+        let body = "Content-Type: text/plain; charset=\"utf-8\"\nContent-Transfer-Encoding: base64\n\nSGVsbG8gd29ybGQh";
+        assert_eq!(extract_plain_reply(body), "Hello world!");
+    }
+
+    #[test]
+    fn decodes_base64_html_part_and_strips() {
+        // <div>Thanks!</div> -> base64
+        let body = "Content-Type: text/html; charset=\"utf-8\"\nContent-Transfer-Encoding: base64\n\nPGRpdj5UaGFua3MhPC9kaXY+";
+        assert_eq!(extract_plain_reply(body), "Thanks!");
     }
 }
 
