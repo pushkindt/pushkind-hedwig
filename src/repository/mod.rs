@@ -79,6 +79,12 @@ pub trait EmailWriter {
         recipient_id: i32,
         updates: &UpdateEmailRecipient,
     ) -> RepositoryResult<EmailWithRecipients>;
+    fn unsubscribe_recipient(
+        &self,
+        email: &str,
+        hub_id: i32,
+        reason: Option<&str>,
+    ) -> RepositoryResult<()>;
 }
 
 /// Read-only operations for hubs.

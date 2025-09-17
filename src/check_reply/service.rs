@@ -102,11 +102,19 @@ fn extract_bounce_recipient(body: &str) -> Option<String> {
 }
 
 async fn send_unsubscribe_message(
+    repo: &DieselRepository,
     zmq_sender: &ZmqSender,
     hub_id: i32,
     email: String,
     reason: Option<String>,
 ) {
+    match repo.unsubscribe_recipient(&email, hub_id, reason.as_deref()) {
+        Ok(_) => log::info!("Persisted unsubscribe for {email} in hub#{hub_id}"),
+        Err(err) => {
+            log::error!("Cannot persist unsubscribe for {email} in hub#{hub_id}: {err}");
+        }
+    }
+
     let message = ZMQUnsubscribeMessage {
         hub_id,
         email: email.clone(),
@@ -196,8 +204,14 @@ pub async fn process_new_message(
         if subject.eq_ignore_ascii_case("unsubscribe") {
             match extract_sender_email(header_str) {
                 Some(email) => {
-                    send_unsubscribe_message(zmq_sender, hub_id, email, Some(subject.clone()))
-                        .await;
+                    send_unsubscribe_message(
+                        repo,
+                        zmq_sender,
+                        hub_id,
+                        email,
+                        Some(subject.clone()),
+                    )
+                    .await;
                     return;
                 }
                 None => log::warn!(
@@ -209,8 +223,14 @@ pub async fn process_new_message(
             match fetch_message_body(session, uid).await {
                 Some(body) => match extract_bounce_recipient(&body) {
                     Some(email) => {
-                        send_unsubscribe_message(zmq_sender, hub_id, email, Some(subject.clone()))
-                            .await;
+                        send_unsubscribe_message(
+                            repo,
+                            zmq_sender,
+                            hub_id,
+                            email,
+                            Some(subject.clone()),
+                        )
+                        .await;
                         return;
                     }
                     None => log::warn!(

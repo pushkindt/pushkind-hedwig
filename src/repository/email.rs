@@ -14,6 +14,7 @@ use pushkind_common::models::emailer::email::{
 };
 use pushkind_common::repository::errors::{RepositoryError, RepositoryResult};
 
+use crate::models::Unsubscribe;
 use crate::repository::{DieselRepository, EmailReader, EmailWriter};
 
 impl EmailReader for DieselRepository {
@@ -159,5 +160,28 @@ impl EmailWriter for DieselRepository {
             email: email.into(),
             recipients: recipients.into_iter().map(Into::into).collect(),
         })
+    }
+
+    fn unsubscribe_recipient(
+        &self,
+        email: &str,
+        hub_id: i32,
+        reason: Option<&str>,
+    ) -> RepositoryResult<()> {
+        use pushkind_common::schema::emailer::unsubscribes;
+
+        let mut conn = self.conn()?;
+
+        diesel::insert_into(unsubscribes::table)
+            .values(Unsubscribe {
+                email,
+                hub_id,
+                reason,
+            })
+            .on_conflict((unsubscribes::email, unsubscribes::hub_id))
+            .do_nothing()
+            .execute(&mut conn)?;
+
+        Ok(())
     }
 }
