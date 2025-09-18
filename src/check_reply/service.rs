@@ -1,4 +1,5 @@
-use std::str;
+use std::collections::HashSet;
+use std::{convert::TryFrom, str};
 
 use async_imap::Session;
 use futures::StreamExt;
@@ -13,7 +14,7 @@ use tokio::time::{Duration, sleep};
 use tokio_rustls::client::TlsStream;
 
 use crate::errors::Error;
-use crate::repository::{DieselRepository, EmailReader, EmailWriter};
+use crate::repository::{DieselRepository, EmailReader, EmailWriter, HubWriter};
 
 use super::imap::{fetch_message_body, init_session};
 use super::parser::{extract_plain_reply, extract_recipient_id};
@@ -264,6 +265,39 @@ pub async fn process_new_message(
     }
 }
 
+fn persist_last_processed_uid(
+    repo: &DieselRepository,
+    hub_id: i32,
+    stored_uid: &mut i32,
+    candidate_uid: u32,
+) {
+    let Ok(new_uid) = i32::try_from(candidate_uid) else {
+        log::warn!(
+            "Skipping IMAP UID persistence for hub#{} because {} exceeds i32 bounds",
+            hub_id,
+            candidate_uid
+        );
+        return;
+    };
+
+    if new_uid <= *stored_uid {
+        return;
+    }
+
+    match repo.set_imap_last_uid(hub_id, new_uid) {
+        Ok(_) => {
+            *stored_uid = new_uid;
+            log::debug!("Persisted IMAP last UID {} for hub#{}", new_uid, hub_id);
+        }
+        Err(err) => log::error!(
+            "Cannot persist IMAP last UID {} for hub#{}: {}",
+            new_uid,
+            hub_id,
+            err
+        ),
+    }
+}
+
 pub async fn monitor_hub(
     repo: DieselRepository,
     hub: Hub,
@@ -285,38 +319,26 @@ pub async fn monitor_hub(
 
     let mut session = init_session(imap_server, imap_port, username, password).await?;
 
-    let recipients = repo.list_not_replied_email_recipients(hub.id)?;
+    let mut last_uid: u32 = hub.imap_last_uid.max(0) as u32;
+    let mut persisted_uid = hub.imap_last_uid;
 
-    log::info!(
-        "Found {} recipients for the startup check in hub#{}",
-        recipients.len(),
-        hub.id,
-    );
-    for recipient in recipients {
-        let in_reply_to_id = format!("<{}@{}>", recipient.id, domain);
-        let query = format!("HEADER In-Reply-To {in_reply_to_id}");
-        let search_result = match session.uid_search(&query).await {
-            Ok(res) => res,
-            Err(e) => {
-                log::error!("Cannot search for emails in hub#{}: {e}", hub.id);
-                continue;
-            }
-        };
-
-        if let Some(uid) = search_result.iter().max() {
-            let reply = fetch_message_body(&mut session, *uid)
-                .await
-                .map(|b| extract_plain_reply(&b));
-            process_reply(&repo, hub.id, &recipient, reply, zmq_sender).await;
+    let initial_search = format!("UID {}:*", last_uid.saturating_add(1));
+    let initial_uids = match session.uid_search(&initial_search).await {
+        Ok(uids) => uids,
+        Err(e) => {
+            log::error!("Cannot fetch initial IMAP backlog in hub#{}: {e}", hub.id);
+            HashSet::<u32>::new()
         }
+    };
+
+    for uid in &initial_uids {
+        process_new_message(&repo, &mut session, *uid, &domain, hub.id, zmq_sender).await;
     }
 
-    let mut last_uid = session
-        .uid_search("ALL")
-        .await
-        .ok()
-        .and_then(|uids| uids.into_iter().max())
-        .unwrap_or(0);
+    if let Some(max_uid) = initial_uids.iter().max() {
+        last_uid = *max_uid;
+        persist_last_processed_uid(&repo, hub.id, &mut persisted_uid, last_uid);
+    }
 
     log::info!("Starting a monitoring loop for hub#{}", hub.id);
     loop {
@@ -358,7 +380,7 @@ pub async fn monitor_hub(
             }
         };
 
-        let search_query = format!("UID {}:*", last_uid + 1);
+        let search_query = format!("UID {}:*", last_uid.saturating_add(1));
         let new_uids = match session.uid_search(&search_query).await {
             Ok(uids) => uids,
             Err(e) => {
@@ -373,6 +395,7 @@ pub async fn monitor_hub(
 
         if let Some(max_uid) = new_uids.iter().max() {
             last_uid = *max_uid;
+            persist_last_processed_uid(&repo, hub.id, &mut persisted_uid, last_uid);
         }
     }
 }
