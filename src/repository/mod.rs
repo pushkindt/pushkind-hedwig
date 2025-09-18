@@ -95,3 +95,9 @@ pub trait HubReader {
     /// Lists all hubs stored in the repository.
     fn list_hubs(&self) -> RepositoryResult<Vec<Hub>>;
 }
+
+/// Write operations for hub entities.
+pub trait HubWriter {
+    /// Persists the latest seen IMAP UID for the hub.
+    fn set_imap_last_uid(&self, hub_id: i32, uid: i32) -> RepositoryResult<()>;
+}

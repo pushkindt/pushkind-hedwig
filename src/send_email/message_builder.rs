@@ -112,6 +112,7 @@ mod tests {
             imap_server: None,
             imap_port: None,
             email_template: Some("Hi {name}! {message} Unsubscribe: {unsubscribe_url}".into()),
+            imap_last_uid: 0,
         }
     }
 
