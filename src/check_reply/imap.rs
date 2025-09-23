@@ -57,12 +57,14 @@ pub async fn init_session(
     Ok(session)
 }
 
-/// Fetch the body of a message by UID.
-pub async fn fetch_message_body(
+/// Fetch the raw RFC822 message by UID.
+pub async fn fetch_message_rfc822(
     session: &mut Session<TlsStream<TcpStream>>,
     uid: u32,
-) -> Option<String> {
-    let mut fetches = match session.uid_fetch(uid.to_string(), "RFC822.TEXT").await {
+) -> Option<Vec<u8>> {
+    // Fetch the whole message (headers + body) so downstream parsers can inspect
+    // MIME headers like `Content-Transfer-Encoding`.
+    let mut fetches = match session.uid_fetch(uid.to_string(), "BODY.PEEK[]").await {
         Ok(f) => f,
         Err(e) => {
             log::error!("Cannot fetch body for UID {uid}: {e}");
@@ -79,13 +81,8 @@ pub async fn fetch_message_body(
         None => return None,
     };
 
-    let body = fetch.text().or_else(|| fetch.body())?;
-
-    match std::str::from_utf8(body) {
-        Ok(s) => Some(s.to_string()),
-        Err(e) => {
-            log::error!("Cannot parse body utf8 for UID {uid}: {e}");
-            None
-        }
-    }
+    fetch
+        .body()
+        .or_else(|| fetch.text())
+        .map(|raw| raw.to_vec())
 }

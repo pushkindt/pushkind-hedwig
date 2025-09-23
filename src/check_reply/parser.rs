@@ -1,75 +1,215 @@
-use base64::{Engine as _, engine::general_purpose};
 use html2text;
+use mailparse::{self, MailAddr, MailAddrList, MailHeaderMap, ParsedMail};
+use once_cell::sync::Lazy;
+use regex::Regex;
 
-/// Try to extract and decode a base64-encoded MIME part from the input.
-/// Returns the decoded string and whether the part is HTML.
-fn try_decode_base64_part(input: &str) -> Option<(String, bool)> {
-    // Work with lowercase for case-insensitive search without allocating too much
-    let lower = input.to_lowercase();
-    let needle = "content-transfer-encoding: base64";
-    let mut start_pos = 0usize;
+/// Parsed data extracted from an email message relevant for reply handling.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct ParsedEmail {
+    pub subject: Option<String>,
+    pub sender_email: Option<String>,
+    pub recipient_id: Option<i32>,
+    pub reply: Option<String>,
+    pub bounce_recipient: Option<String>,
+}
 
-    while let Some(idx) = lower[start_pos..].find(needle) {
-        let header_pos = start_pos + idx;
+/// Parse an RFC822 email message using `mailparse` and expose the relevant fields.
+pub fn parse_email(raw: &[u8], domain: &str) -> Result<ParsedEmail, mailparse::MailParseError> {
+    let parsed = mailparse::parse_mail(raw)?;
+    let subject = parsed.headers.get_first_value("Subject");
+    let sender_email = extract_sender_email(&parsed);
+    let recipient_id = extract_recipient_id(&parsed, domain);
+    let bounce_recipient = find_bounce_recipient(&parsed);
+    let reply = find_reply(&parsed);
 
-        // Find the start of headers for this part (previous blank line or start)
-        let headers_start = lower[..header_pos]
-            .rfind("\n\n")
-            .map(|p| p + 2)
-            .or_else(|| lower[..header_pos].rfind("\r\n\r\n").map(|p| p + 4))
-            .unwrap_or(0);
+    Ok(ParsedEmail {
+        subject,
+        sender_email,
+        recipient_id,
+        reply,
+        bounce_recipient,
+    })
+}
 
-        // Determine content type within headers region
-        let headers_slice = &lower[headers_start..header_pos];
-        let is_html = headers_slice.contains("content-type: text/html");
+fn extract_sender_email(parsed: &ParsedMail) -> Option<String> {
+    for header in ["Sender", "From"] {
+        if let Some(mail_header) = parsed.headers.get_first_header(header)
+            && let Ok(addresses) = mailparse::addrparse_header(mail_header)
+            && let Some(email) = first_mailbox(&addresses)
+        {
+            return Some(email);
+        }
+    }
+    None
+}
 
-        // Find the end of headers for this part (first blank line after header_pos)
-        let after_header = header_pos + needle.len();
-        let body_start = lower[after_header..]
-            .find("\n\n")
-            .map(|p| after_header + p + 2)
-            .or_else(|| {
-                lower[after_header..]
-                    .find("\r\n\r\n")
-                    .map(|p| after_header + p + 4)
-            });
-
-        let body_start = match body_start {
-            Some(p) => p,
-            None => {
-                // No body after header; try next occurrence
-                start_pos = after_header;
-                continue;
-            }
-        };
-
-        // Heuristically choose end of this part: either next boundary line starting with "--" or end of message
-        let boundary_rel = lower[body_start..]
-            .find("\n--")
-            .or_else(|| lower[body_start..].find("\r\n--"));
-        let body_end = boundary_rel.map(|p| body_start + p).unwrap_or(input.len());
-
-        let candidate = &input[body_start..body_end];
-
-        // Try to decode this candidate
-        // Base64 decoder from crate; strip whitespace to be tolerant of wrapped lines
-        let compact: String = candidate.chars().filter(|c| !c.is_whitespace()).collect();
-        match general_purpose::STANDARD.decode(compact.as_bytes()) {
-            Ok(bytes) => match String::from_utf8(bytes) {
-                Ok(s) => return Some((s, is_html)),
-                Err(_) => {
-                    // Not valid UTF-8; try next occurrence
+fn first_mailbox(addresses: &MailAddrList) -> Option<String> {
+    for addr in addresses.iter() {
+        match addr {
+            MailAddr::Single(single) => return Some(single.addr.clone()),
+            MailAddr::Group(group) => {
+                if let Some(member) = group.addrs.first() {
+                    return Some(member.addr.clone());
                 }
-            },
-            Err(_) => {
-                // Not a valid base64 block; try next occurrence
             }
         }
+    }
+    None
+}
 
-        start_pos = after_header;
+fn extract_recipient_id(parsed: &ParsedMail, domain: &str) -> Option<i32> {
+    let header = parsed.headers.get_first_value("In-Reply-To")?;
+    for segment in header.split('<').skip(1) {
+        if let Some(candidate) = segment.split('>').next() {
+            let mut parts = candidate.split('@');
+            match (parts.next(), parts.next()) {
+                (Some(id), Some(message_domain)) if message_domain == domain => {
+                    if let Ok(value) = id.parse() {
+                        return Some(value);
+                    }
+                }
+                _ => continue,
+            }
+        }
+    }
+    None
+}
+
+fn find_reply(parsed: &ParsedMail) -> Option<String> {
+    if let Some(body) = find_first_body(parsed, "text/plain") {
+        let cleaned = extract_reply_text(&body);
+        if !cleaned.is_empty() {
+            return Some(cleaned);
+        }
+    }
+
+    if let Some(body) = find_first_body(parsed, "text/html") {
+        let text = strip_html_tags(&body);
+        let cleaned = extract_reply_text(&text);
+        if !cleaned.is_empty() {
+            return Some(cleaned);
+        }
     }
 
     None
+}
+
+fn find_first_body(parsed: &ParsedMail, mimetype: &str) -> Option<String> {
+    if parsed.subparts.is_empty() {
+        if !is_attachment(parsed) && parsed.ctype.mimetype.eq_ignore_ascii_case(mimetype) {
+            return parsed.get_body().ok();
+        }
+        return None;
+    }
+
+    for part in &parsed.subparts {
+        if let Some(body) = find_first_body(part, mimetype) {
+            return Some(body);
+        }
+    }
+
+    None
+}
+
+fn is_attachment(part: &ParsedMail) -> bool {
+    part.headers
+        .get_first_value("Content-Disposition")
+        .map(|value| value.to_ascii_lowercase().starts_with("attachment"))
+        .unwrap_or(false)
+}
+
+fn find_bounce_recipient(parsed: &ParsedMail) -> Option<String> {
+    let mut stack = vec![parsed];
+    while let Some(part) = stack.pop() {
+        if let Some(email) = bounce_from_part(part) {
+            return Some(email);
+        }
+        for sub in &part.subparts {
+            stack.push(sub);
+        }
+    }
+    None
+}
+
+fn bounce_from_part(part: &ParsedMail) -> Option<String> {
+    let mimetype = part.ctype.mimetype.to_ascii_lowercase();
+    if mimetype == "message/delivery-status"
+        && let Ok(body) = part.get_body()
+        && let Some(email) = extract_bounce_from_status(&body)
+    {
+        return Some(email);
+    }
+
+    if (mimetype == "text/plain" || mimetype == "text/html")
+        && let Ok(body) = part.get_body()
+    {
+        let text = if mimetype == "text/html" {
+            strip_html_tags(&body)
+        } else {
+            body
+        };
+        if let Some(email) = extract_bounce_from_text(&text) {
+            return Some(email);
+        }
+    }
+
+    None
+}
+
+fn extract_bounce_from_status(input: &str) -> Option<String> {
+    for line in input.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let lower = line.to_ascii_lowercase();
+        if lower.starts_with("final-recipient") || lower.starts_with("original-recipient") {
+            if let Some((_, rest)) = line.split_once(';') {
+                if let Some(email) = extract_email_address(rest.trim()) {
+                    return Some(email);
+                }
+            } else if let Some(email) = extract_email_address(line) {
+                return Some(email);
+            }
+        }
+    }
+    None
+}
+
+fn extract_bounce_from_text(input: &str) -> Option<String> {
+    let mut fallback = None;
+    for line in input.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+
+        if let Some(email) = extract_email_address(line) {
+            let lower = line.to_ascii_lowercase();
+            if lower.contains("final-recipient")
+                || lower.contains("original-recipient")
+                || lower.contains("for <")
+                || lower.contains("for ")
+                || lower.contains("recipient:")
+            {
+                return Some(email);
+            }
+
+            if fallback.is_none() && !lower.contains("mailer-daemon") {
+                fallback = Some(email);
+            }
+        }
+    }
+
+    fallback
+}
+
+static EMAIL_REGEX: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"(?i)[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}").expect("Email regex should compile")
+});
+
+fn extract_email_address(input: &str) -> Option<String> {
+    EMAIL_REGEX.find(input).map(|m| m.as_str().to_string())
 }
 
 /// Remove HTML tags from the input and return plain text.
@@ -79,22 +219,10 @@ pub fn strip_html_tags(input: &str) -> String {
     plain.replace('\u{00a0}', " ")
 }
 
-/// Extract the user's reply from an HTML email body.
-pub fn extract_plain_reply(input: &str) -> String {
-    // If the body contains base64-encoded part, try to decode and use it
-    let (maybe_decoded, is_html) = match try_decode_base64_part(input) {
-        Some((decoded, is_html)) => (decoded, is_html),
-        None => (input.to_string(), true), // assume html by default, html2text copes with plain text too
-    };
-
-    let sanitized = if is_html {
-        strip_html_tags(&maybe_decoded)
-    } else {
-        // Already plain text
-        maybe_decoded.clone()
-    };
-    let normalized = sanitized.replace('\r', "");
+fn extract_reply_text(input: &str) -> String {
+    let normalized = input.replace('\r', "");
     let mut result_lines = Vec::new();
+
     for line in normalized.lines() {
         let trimmed = line.trim();
         if trimmed.is_empty() {
@@ -150,20 +278,64 @@ pub fn extract_plain_reply(input: &str) -> String {
     reply
 }
 
-/// Extract the recipient id from the `In-Reply-To` header.
-pub fn extract_recipient_id(header: &str, domain: &str) -> Option<i32> {
-    header
-        .lines()
-        .find(|line| line.starts_with("In-Reply-To:"))
-        .and_then(|line| line.split('<').nth(1))
-        .and_then(|part| part.split('>').next())
-        .and_then(|msg_id| {
-            let mut parts = msg_id.split('@');
-            match (parts.next(), parts.next()) {
-                (Some(id), Some(d)) if d == domain => id.parse().ok(),
-                _ => None,
-            }
-        })
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const DOMAIN: &str = "example.com";
+
+    fn parse(raw: &str) -> ParsedEmail {
+        parse_email(raw.as_bytes(), DOMAIN).expect("mail should parse")
+    }
+
+    #[test]
+    fn parses_plain_text_reply() {
+        let raw = "Subject: Re: Hello\r\nFrom: Sender <sender@example.com>\r\nIn-Reply-To: <42@example.com>\r\nContent-Type: text/plain; charset=\"utf-8\"\r\n\r\nThanks!\r\n";
+        let parsed = parse(raw);
+        assert_eq!(parsed.subject.as_deref(), Some("Re: Hello"));
+        assert_eq!(parsed.sender_email.as_deref(), Some("sender@example.com"));
+        assert_eq!(parsed.recipient_id, Some(42));
+        assert_eq!(parsed.reply.as_deref(), Some("Thanks!"));
+        assert!(parsed.bounce_recipient.is_none());
+    }
+
+    #[test]
+    fn prefers_sender_header_for_email_extraction() {
+        let raw = "Subject: Hi\r\nSender: sender@example.com\r\nFrom: other@example.com\r\nContent-Type: text/plain; charset=\"utf-8\"\r\n\r\nHello\r\n";
+        let parsed = parse(raw);
+        assert_eq!(parsed.sender_email.as_deref(), Some("sender@example.com"));
+    }
+
+    #[test]
+    fn decodes_base64_html_reply() {
+        let raw = "Subject: Hi\r\nFrom: Sender <sender@example.com>\r\nContent-Type: text/html; charset=\"utf-8\"\r\nContent-Transfer-Encoding: base64\r\n\r\nPGRpdj5UaGFua3MhPC9kaXY+";
+        let parsed = parse(raw);
+        assert_eq!(parsed.reply.as_deref(), Some("Thanks!"));
+    }
+
+    #[test]
+    fn ignores_quoted_lines_and_separators() {
+        let raw = "Subject: Re\r\nFrom: Sender <sender@example.com>\r\nContent-Type: text/html; charset=\"utf-8\"\r\n\r\n<div>Thanks!</div><div><br></div><div>> quoted</div><div>On Tue, Someone wrote:</div><blockquote><div>Original</div></blockquote>";
+        let parsed = parse(raw);
+        assert_eq!(parsed.reply.as_deref(), Some("Thanks!"));
+    }
+
+    #[test]
+    fn extracts_bounce_recipient_from_delivery_status() {
+        let raw = "Subject: Undelivered\r\nFrom: Mailer <mailer@example.com>\r\nContent-Type: multipart/report; boundary=\"BOUNDARY\"\r\n\r\n--BOUNDARY\r\nContent-Type: message/delivery-status\r\n\r\nFinal-Recipient: rfc822; bounced@example.com\r\n--BOUNDARY--\r\n";
+        let parsed = parse(raw);
+        assert_eq!(
+            parsed.bounce_recipient.as_deref(),
+            Some("bounced@example.com")
+        );
+    }
+
+    #[test]
+    fn extracts_recipient_id_from_in_reply_to() {
+        let raw = "Subject: Hi\r\nFrom: Sender <sender@example.com>\r\nIn-Reply-To: <24@example.com>\r\nContent-Type: text/plain; charset=\"utf-8\"\r\n\r\nHi\r\n";
+        let parsed = parse(raw);
+        assert_eq!(parsed.recipient_id, Some(24));
+    }
 }
 
 #[cfg(test)]
@@ -183,63 +355,5 @@ mod strip_html_tags_tests {
             strip_html_tags("<p>First</p><p>Second</p>").trim(),
             "First\n\nSecond"
         );
-    }
-}
-
-#[cfg(test)]
-mod extract_plain_reply_tests {
-    use super::*;
-
-    #[test]
-    fn extracts_plain_text_from_html() {
-        let html = "<div>Hello <b>world</b></div>";
-        assert_eq!(extract_plain_reply(html), "Hello world");
-    }
-
-    #[test]
-    fn ignores_quoted_lines_and_separators() {
-        let html = "<div>Thanks!</div><div><br></div><div>> quoted</div><div>On Tue, Someone wrote:</div><blockquote><div>Original</div></blockquote>";
-        assert_eq!(extract_plain_reply(html), "Thanks!");
-    }
-
-    #[test]
-    fn handles_empty_input() {
-        assert_eq!(extract_plain_reply(""), "");
-    }
-
-    #[test]
-    fn decodes_base64_plain_text_part() {
-        // Simple MIME-like snippet with base64 plain text
-        let body = "Content-Type: text/plain; charset=\"utf-8\"\nContent-Transfer-Encoding: base64\n\nSGVsbG8gd29ybGQh";
-        assert_eq!(extract_plain_reply(body), "Hello world!");
-    }
-
-    #[test]
-    fn decodes_base64_html_part_and_strips() {
-        // <div>Thanks!</div> -> base64
-        let body = "Content-Type: text/html; charset=\"utf-8\"\nContent-Transfer-Encoding: base64\n\nPGRpdj5UaGFua3MhPC9kaXY+";
-        assert_eq!(extract_plain_reply(body), "Thanks!");
-    }
-}
-
-#[cfg(test)]
-mod extract_recipient_id_tests {
-    use super::*;
-
-    #[test]
-    fn extracts_id_from_valid_header() {
-        let header = "Subject: hi\nIn-Reply-To: <42@example.com>\n";
-        assert_eq!(extract_recipient_id(header, "example.com"), Some(42));
-    }
-
-    #[test]
-    fn returns_none_for_invalid_header() {
-        let wrong_domain = "In-Reply-To: <42@other.com>\n";
-        assert_eq!(extract_recipient_id(wrong_domain, "example.com"), None);
-
-        let non_int = "In-Reply-To: <abc@example.com>\n";
-        assert_eq!(extract_recipient_id(non_int, "example.com"), None);
-
-        assert_eq!(extract_recipient_id("", "example.com"), None);
     }
 }

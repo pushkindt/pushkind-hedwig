@@ -1,14 +1,11 @@
 use std::collections::HashSet;
-use std::{convert::TryFrom, str};
+use std::convert::TryFrom;
 
 use async_imap::Session;
-use futures::StreamExt;
-use once_cell::sync::Lazy;
 use pushkind_common::domain::emailer::email::{EmailRecipient, UpdateEmailRecipient};
 use pushkind_common::domain::emailer::hub::Hub;
 use pushkind_common::models::emailer::zmq::{ZMQReplyMessage, ZMQUnsubscribeMessage};
 use pushkind_common::zmq::ZmqSender;
-use regex::Regex;
 use tokio::net::TcpStream;
 use tokio::time::{Duration, sleep};
 use tokio_rustls::client::TlsStream;
@@ -16,91 +13,8 @@ use tokio_rustls::client::TlsStream;
 use crate::errors::Error;
 use crate::repository::{DieselRepository, EmailReader, EmailWriter, HubWriter};
 
-use super::imap::{fetch_message_body, init_session};
-use super::parser::{extract_plain_reply, extract_recipient_id};
-
-static EMAIL_REGEX: Lazy<Option<Regex>> =
-    Lazy::new(|| Regex::new(r"(?i)[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}").ok());
-
-fn extract_header_value(header: &str, name: &str) -> Option<String> {
-    let mut collected = String::new();
-    let mut found = false;
-    let header_name = format!("{}:", name.to_ascii_lowercase());
-
-    for raw_line in header.lines() {
-        let line = raw_line.trim_end_matches('\r');
-        if found {
-            if line.starts_with(' ') || line.starts_with('\t') {
-                if !collected.is_empty() {
-                    collected.push(' ');
-                }
-                collected.push_str(line.trim());
-                continue;
-            }
-            break;
-        }
-
-        let lower_line = line.to_ascii_lowercase();
-        if lower_line.starts_with(&header_name)
-            && let Some((_, value)) = line.split_once(':')
-        {
-            collected.push_str(value.trim());
-            found = true;
-        }
-    }
-
-    if found { Some(collected) } else { None }
-}
-
-fn extract_email_address(input: &str) -> Option<String> {
-    match &*EMAIL_REGEX {
-        Some(regex) => regex.find(input).map(|m| m.as_str().to_string()),
-        None => {
-            log::error!("Email regex failed to compile");
-            None
-        }
-    }
-}
-
-fn extract_sender_email(header: &str) -> Option<String> {
-    for field in ["Sender", "From"] {
-        if let Some(value) = extract_header_value(header, field)
-            && let Some(email) = extract_email_address(&value)
-        {
-            return Some(email);
-        }
-    }
-    None
-}
-
-fn extract_bounce_recipient(body: &str) -> Option<String> {
-    let mut fallback = None;
-
-    for raw_line in body.lines() {
-        let line = raw_line.trim();
-        if line.is_empty() {
-            continue;
-        }
-
-        if let Some(email) = extract_email_address(line) {
-            let lower = line.to_ascii_lowercase();
-            if lower.contains("final-recipient")
-                || lower.contains("original-recipient")
-                || lower.contains("for <")
-                || lower.contains("for ")
-                || lower.contains("recipient:")
-            {
-                return Some(email);
-            }
-
-            if fallback.is_none() && !lower.contains("mailer-daemon") {
-                fallback = Some(email);
-            }
-        }
-    }
-
-    fallback
-}
+use super::imap::{fetch_message_rfc822, init_session};
+use super::parser::parse_email;
 
 async fn send_unsubscribe_message(
     repo: &DieselRepository,
@@ -130,6 +44,33 @@ async fn send_unsubscribe_message(
     }
 }
 
+async fn send_reply_message(
+    zmq_sender: &ZmqSender,
+    hub_id: i32,
+    email: &str,
+    reply: &Option<String>,
+    email_id: Option<i32>,
+) {
+    let message = ZMQReplyMessage {
+        hub_id,
+        email: email.to_owned(),
+        message: reply.clone().unwrap_or_default(),
+    };
+
+    match zmq_sender.send_json(&message).await {
+        Ok(_) => {
+            if let Some(email_id) = email_id {
+                log::info!("ZMQ message sent for email id: {email_id}");
+            } else {
+                log::info!("ZMQ message sent for {email} in hub#{hub_id}");
+            }
+        }
+        Err(e) => {
+            log::error!("Cannot send ZMQ message for {email} in hub#{hub_id}: {e}");
+        }
+    }
+}
+
 pub async fn process_reply(
     repo: &DieselRepository,
     hub_id: i32,
@@ -137,16 +78,14 @@ pub async fn process_reply(
     reply: Option<String>,
     zmq_sender: &ZmqSender,
 ) {
-    let msg = ZMQReplyMessage {
+    send_reply_message(
+        zmq_sender,
         hub_id,
-        email: recipient.address.clone(),
-        message: reply.clone().unwrap_or_default(),
-    };
-    if let Err(e) = zmq_sender.send_json(&msg).await {
-        log::error!("Cannot send ZMQ message: {e}");
-    } else {
-        log::info!("ZMQ message sent for email id: {}", recipient.email_id);
-    }
+        &recipient.address,
+        &reply,
+        Some(recipient.email_id),
+    )
+    .await;
     if let Err(e) = repo.update_recipient(
         recipient.id,
         &UpdateEmailRecipient {
@@ -170,40 +109,22 @@ pub async fn process_new_message(
     hub_id: i32,
     zmq_sender: &ZmqSender,
 ) {
-    let mut fetches = match session.uid_fetch(uid.to_string(), "RFC822.HEADER").await {
-        Ok(f) => f,
-        Err(e) => {
-            log::error!("Cannot fetch header for UID {uid}: {e}");
-            return;
-        }
-    };
-
-    let fetch = match fetches.next().await {
-        Some(Ok(f)) => f,
-        Some(Err(e)) => {
-            log::error!("Cannot fetch header for UID {uid}: {e}");
-            return;
-        }
-        None => return,
-    };
-    drop(fetches);
-
-    let header = match fetch.header() {
-        Some(h) => h,
+    let raw_message = match fetch_message_rfc822(session, uid).await {
+        Some(raw) => raw,
         None => return,
     };
 
-    let header_str = match str::from_utf8(header) {
-        Ok(s) => s,
-        Err(e) => {
-            log::error!("Cannot parse header utf8: {e}");
+    let parsed = match parse_email(&raw_message, domain) {
+        Ok(parsed) => parsed,
+        Err(err) => {
+            log::error!("Cannot parse email UID {} in hub#{}: {}", uid, hub_id, err);
             return;
         }
     };
 
-    if let Some(subject) = extract_header_value(header_str, "Subject") {
+    if let Some(subject) = parsed.subject.as_ref() {
         if subject.eq_ignore_ascii_case("unsubscribe") {
-            match extract_sender_email(header_str) {
+            match parsed.sender_email.clone() {
                 Some(email) => {
                     send_unsubscribe_message(
                         repo,
@@ -221,35 +142,26 @@ pub async fn process_new_message(
                 ),
             }
         } else if subject.eq_ignore_ascii_case("Undelivered Mail Returned to Sender") {
-            match fetch_message_body(session, uid).await {
-                Some(body) => match extract_bounce_recipient(&body) {
-                    Some(email) => {
-                        send_unsubscribe_message(
-                            repo,
-                            zmq_sender,
-                            hub_id,
-                            email,
-                            Some(subject.clone()),
-                        )
-                        .await;
-                        return;
-                    }
-                    None => log::warn!(
-                        "Undelivered email without identifiable recipient in hub#{}",
-                        hub_id
-                    ),
-                },
-                None => log::warn!("Cannot fetch body for undelivered email in hub#{}", hub_id),
+            if let Some(email) = parsed.bounce_recipient.clone() {
+                send_unsubscribe_message(repo, zmq_sender, hub_id, email, Some(subject.clone()))
+                    .await;
+                return;
+            } else {
+                log::warn!(
+                    "Undelivered email without identifiable recipient in hub#{}",
+                    hub_id
+                );
             }
         }
     }
 
-    if let Some(recipient_id) = extract_recipient_id(header_str, domain) {
-        let reply = fetch_message_body(session, uid)
-            .await
-            .map(|b| extract_plain_reply(&b));
+    if let Some(recipient_id) = parsed.recipient_id {
+        let reply = parsed.reply.clone();
         match repo.get_email_recipient_by_id(recipient_id, hub_id) {
-            Ok(Some(recipient)) => process_reply(repo, hub_id, &recipient, reply, zmq_sender).await,
+            Ok(Some(recipient)) => {
+                process_reply(repo, hub_id, &recipient, reply, zmq_sender).await;
+                return;
+            }
             Ok(None) => log::warn!(
                 "Recipient not found for id {} in hub#{}",
                 recipient_id,
@@ -262,6 +174,16 @@ pub async fn process_new_message(
                 e,
             ),
         }
+    }
+
+    let reply = parsed.reply.clone();
+    if let Some(email) = parsed.sender_email.as_deref() {
+        send_reply_message(zmq_sender, hub_id, email, &reply, None).await;
+    } else {
+        log::warn!(
+            "Cannot send ZMQ reply message in hub#{}: missing sender email",
+            hub_id
+        );
     }
 }
 
@@ -397,37 +319,5 @@ pub async fn monitor_hub(
             last_uid = *max_uid;
             persist_last_processed_uid(&repo, hub.id, &mut persisted_uid, last_uid);
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn extracts_header_values_with_folding() {
-        let header = "Subject: Unsubscribe\r\n\trequest\r\nFrom: Name <user@example.com>\r\n";
-        assert_eq!(
-            extract_header_value(header, "Subject"),
-            Some("Unsubscribe request".to_string())
-        );
-    }
-
-    #[test]
-    fn prefers_sender_header_for_email_extraction() {
-        let header = "Sender: sender@example.com\r\nFrom: other@example.com\r\n";
-        assert_eq!(
-            extract_sender_email(header),
-            Some("sender@example.com".to_string())
-        );
-    }
-
-    #[test]
-    fn extracts_bounce_recipient_from_body() {
-        let body = "Final-Recipient: rfc822; bounced@example.com\nMail delivery failed";
-        assert_eq!(
-            extract_bounce_recipient(body),
-            Some("bounced@example.com".to_string())
-        );
     }
 }
