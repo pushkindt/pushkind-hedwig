@@ -48,22 +48,19 @@ async fn send_reply_message(
     zmq_sender: &ZmqSender,
     hub_id: i32,
     email: &str,
-    reply: &Option<String>,
-    email_id: Option<i32>,
+    reply: Option<&str>,
+    subject: Option<&str>,
 ) {
     let message = ZMQReplyMessage {
         hub_id,
         email: email.to_owned(),
-        message: reply.clone().unwrap_or_default(),
+        message: reply.unwrap_or_default().to_string(),
+        subject: subject.map(str::to_string),
     };
 
     match zmq_sender.send_json(&message).await {
         Ok(_) => {
-            if let Some(email_id) = email_id {
-                log::info!("ZMQ message sent for email id: {email_id}");
-            } else {
-                log::info!("ZMQ message sent for {email} in hub#{hub_id}");
-            }
+            log::info!("ZMQ message sent for {email} in hub#{hub_id}");
         }
         Err(e) => {
             log::error!("Cannot send ZMQ message for {email} in hub#{hub_id}: {e}");
@@ -73,19 +70,9 @@ async fn send_reply_message(
 
 pub async fn process_reply(
     repo: &DieselRepository,
-    hub_id: i32,
     recipient: &EmailRecipient,
     reply: Option<String>,
-    zmq_sender: &ZmqSender,
 ) {
-    send_reply_message(
-        zmq_sender,
-        hub_id,
-        &recipient.address,
-        &reply,
-        Some(recipient.email_id),
-    )
-    .await;
     if let Err(e) = repo.update_recipient(
         recipient.id,
         &UpdateEmailRecipient {
@@ -159,7 +146,7 @@ pub async fn process_new_message(
         let reply = parsed.reply.clone();
         match repo.get_email_recipient_by_id(recipient_id, hub_id) {
             Ok(Some(recipient)) => {
-                process_reply(repo, hub_id, &recipient, reply, zmq_sender).await;
+                process_reply(repo, &recipient, reply).await;
                 return;
             }
             Ok(None) => log::warn!(
@@ -176,9 +163,10 @@ pub async fn process_new_message(
         }
     }
 
-    let reply = parsed.reply.clone();
+    let reply = parsed.reply.as_deref();
+    let subject = parsed.subject.as_deref();
     if let Some(email) = parsed.sender_email.as_deref() {
-        send_reply_message(zmq_sender, hub_id, email, &reply, None).await;
+        send_reply_message(zmq_sender, hub_id, email, reply, subject).await;
     } else {
         log::warn!(
             "Cannot send ZMQ reply message in hub#{}: missing sender email",
