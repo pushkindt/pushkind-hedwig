@@ -147,7 +147,6 @@ pub async fn process_new_message(
         match repo.get_email_recipient_by_id(recipient_id, hub_id) {
             Ok(Some(recipient)) => {
                 process_reply(repo, &recipient, reply).await;
-                return;
             }
             Ok(None) => log::warn!(
                 "Recipient not found for id {} in hub#{}",
