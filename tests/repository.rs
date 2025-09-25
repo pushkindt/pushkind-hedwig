@@ -1,29 +1,35 @@
+mod common;
+
 use std::collections::HashMap;
 
 use diesel::{RunQueryDsl, connection::SimpleConnection};
-use pushkind_common::db::establish_connection_pool;
+use pushkind_common::db::DbPool;
 use pushkind_common::domain::emailer::email::{NewEmail, NewEmailRecipient, UpdateEmailRecipient};
 use pushkind_common::models::emailer::hub::NewHub as DbNewHub;
 use pushkind_common::schema::emailer::hubs;
 use pushkind_hedwig::repository::{DieselRepository, EmailReader, EmailWriter, HubReader};
 use tempfile::TempDir;
 
-fn setup_pool() -> (TempDir, pushkind_common::db::DbPool) {
-    let dir = tempfile::tempdir().unwrap();
-    let db_path = dir.path().join("test.db");
-    let pool = establish_connection_pool(db_path.to_str().unwrap()).unwrap();
-    {
-        let mut conn = pool.get().unwrap();
-        conn.batch_execute(
-            "CREATE TABLE hubs (id INTEGER PRIMARY KEY, login TEXT, password TEXT, sender TEXT, smtp_server TEXT, smtp_port INTEGER, created_at TIMESTAMP, updated_at TIMESTAMP, imap_server TEXT, imap_port INTEGER, email_template TEXT, imap_last_uid INTEGER NOT NULL DEFAULT 0);\n\
-             CREATE TABLE emails (id INTEGER PRIMARY KEY, message TEXT NOT NULL, created_at TIMESTAMP NOT NULL, is_sent BOOL NOT NULL, subject TEXT, attachment BLOB, attachment_name TEXT, attachment_mime TEXT, num_sent INTEGER NOT NULL DEFAULT 0, num_opened INTEGER NOT NULL DEFAULT 0, num_replied INTEGER NOT NULL DEFAULT 0, hub_id INTEGER NOT NULL REFERENCES hubs(id));\n\
-             CREATE TABLE email_recipients (id INTEGER PRIMARY KEY, email_id INTEGER NOT NULL REFERENCES emails(id), address TEXT NOT NULL, opened BOOL NOT NULL, updated_at TIMESTAMP NOT NULL, is_sent BOOL NOT NULL, replied BOOL NOT NULL, name TEXT, fields TEXT, reply TEXT);"
-        ).unwrap();
-    }
-    (dir, pool)
+fn create_schema(pool: &DbPool) {
+    let mut conn = pool.get().unwrap();
+    conn.batch_execute(
+        "CREATE TABLE hubs (id INTEGER PRIMARY KEY, login TEXT, password TEXT, sender TEXT, smtp_server TEXT, smtp_port INTEGER, created_at TIMESTAMP, updated_at TIMESTAMP, imap_server TEXT, imap_port INTEGER, email_template TEXT, imap_last_uid INTEGER NOT NULL DEFAULT 0);\n\
+         CREATE TABLE emails (id INTEGER PRIMARY KEY, message TEXT NOT NULL, created_at TIMESTAMP NOT NULL, is_sent BOOL NOT NULL, subject TEXT, attachment BLOB, attachment_name TEXT, attachment_mime TEXT, num_sent INTEGER NOT NULL DEFAULT 0, num_opened INTEGER NOT NULL DEFAULT 0, num_replied INTEGER NOT NULL DEFAULT 0, hub_id INTEGER NOT NULL REFERENCES hubs(id));\n\
+         CREATE TABLE email_recipients (id INTEGER PRIMARY KEY, email_id INTEGER NOT NULL REFERENCES emails(id), address TEXT NOT NULL, opened BOOL NOT NULL, updated_at TIMESTAMP NOT NULL, is_sent BOOL NOT NULL, replied BOOL NOT NULL, name TEXT, fields TEXT, reply TEXT);"
+    )
+    .unwrap();
 }
 
-fn insert_hub(pool: &pushkind_common::db::DbPool) {
+fn setup_test_db(db_name: &str) -> (TempDir, common::TestDb, DbPool) {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join(db_name);
+    let test_db = common::TestDb::new(db_path.to_str().unwrap());
+    let pool = test_db.pool();
+    create_schema(&pool);
+    (dir, test_db, pool)
+}
+
+fn insert_hub(pool: &DbPool) {
     let mut conn = pool.get().unwrap();
     let hub = DbNewHub {
         id: 1,
@@ -64,7 +70,7 @@ fn create_email(repo: &DieselRepository) -> (i32, i32) {
 
 #[test]
 fn create_and_get_email() {
-    let (_dir, pool) = setup_pool();
+    let (_temp_dir, _test_db, pool) = setup_test_db("create_and_get_email.db");
     insert_hub(&pool);
     let repo = DieselRepository::new(pool.clone());
     let (email_id, recipient_id) = create_email(&repo);
@@ -76,7 +82,7 @@ fn create_and_get_email() {
 
 #[test]
 fn list_and_get_recipient() {
-    let (_dir, pool) = setup_pool();
+    let (_temp_dir, _test_db, pool) = setup_test_db("list_and_get_recipient.db");
     insert_hub(&pool);
     let repo = DieselRepository::new(pool.clone());
     let (email_id, recipient_id) = create_email(&repo);
@@ -92,7 +98,7 @@ fn list_and_get_recipient() {
 
 #[test]
 fn update_recipient_updates_stats() {
-    let (_dir, pool) = setup_pool();
+    let (_temp_dir, _test_db, pool) = setup_test_db("update_recipient_updates_stats.db");
     insert_hub(&pool);
     let repo = DieselRepository::new(pool.clone());
     let (email_id, recipient_id) = create_email(&repo);
@@ -119,7 +125,7 @@ fn update_recipient_updates_stats() {
 
 #[test]
 fn hub_queries() {
-    let (_dir, pool) = setup_pool();
+    let (_temp_dir, _test_db, pool) = setup_test_db("hub_queries.db");
     insert_hub(&pool);
     let repo = DieselRepository::new(pool.clone());
 
