@@ -17,7 +17,7 @@ use super::imap::{fetch_message_rfc822, init_session};
 use super::parser::parse_email;
 
 async fn send_unsubscribe_message(
-    repo: &DieselRepository,
+    repo: &(impl EmailWriter + ?Sized),
     zmq_sender: &ZmqSender,
     hub_id: i32,
     email: String,
@@ -69,7 +69,7 @@ async fn send_reply_message(
 }
 
 pub async fn process_reply(
-    repo: &DieselRepository,
+    repo: &(impl EmailWriter + ?Sized),
     recipient: &EmailRecipient,
     reply: Option<String>,
 ) {
@@ -89,7 +89,7 @@ pub async fn process_reply(
 }
 
 pub async fn process_new_message(
-    repo: &DieselRepository,
+    repo: &(impl EmailReader + EmailWriter + ?Sized),
     session: &mut Session<TlsStream<TcpStream>>,
     uid: u32,
     domain: &str,
@@ -175,7 +175,7 @@ pub async fn process_new_message(
 }
 
 fn persist_last_processed_uid(
-    repo: &DieselRepository,
+    repo: &(impl HubWriter + ?Sized),
     hub_id: i32,
     stored_uid: &mut i32,
     candidate_uid: u32,
@@ -205,6 +205,12 @@ fn persist_last_processed_uid(
             err
         ),
     }
+}
+
+fn ordered_uids(uids: impl IntoIterator<Item = u32>) -> Vec<u32> {
+    let mut ordered: Vec<u32> = uids.into_iter().collect();
+    ordered.sort_unstable();
+    ordered
 }
 
 pub async fn monitor_hub(
@@ -240,13 +246,14 @@ pub async fn monitor_hub(
         }
     };
 
-    for uid in &initial_uids {
-        process_new_message(&repo, &mut session, *uid, &domain, hub.id, zmq_sender).await;
-    }
-
-    if let Some(max_uid) = initial_uids.iter().max() {
-        last_uid = *max_uid;
-        persist_last_processed_uid(&repo, hub.id, &mut persisted_uid, last_uid);
+    let cutoff_uid = last_uid;
+    for uid in ordered_uids(initial_uids.into_iter())
+        .into_iter()
+        .filter(|&uid| uid != cutoff_uid)
+    {
+        process_new_message(&repo, &mut session, uid, &domain, hub.id, zmq_sender).await;
+        last_uid = uid;
+        persist_last_processed_uid(&repo, hub.id, &mut persisted_uid, uid);
     }
 
     log::info!("Starting a monitoring loop for hub#{}", hub.id);
@@ -298,13 +305,82 @@ pub async fn monitor_hub(
             }
         };
 
-        for uid in &new_uids {
-            process_new_message(&repo, &mut session, *uid, &domain, hub.id, zmq_sender).await;
+        for uid in ordered_uids(new_uids.into_iter()) {
+            process_new_message(&repo, &mut session, uid, &domain, hub.id, zmq_sender).await;
+            last_uid = uid;
+            persist_last_processed_uid(&repo, hub.id, &mut persisted_uid, uid);
         }
+    }
+}
 
-        if let Some(max_uid) = new_uids.iter().max() {
-            last_uid = *max_uid;
-            persist_last_processed_uid(&repo, hub.id, &mut persisted_uid, last_uid);
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pushkind_common::repository::errors::RepositoryResult;
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Clone, Default)]
+    struct RecordingHubWriter {
+        calls: Arc<Mutex<Vec<(i32, i32)>>>,
+    }
+
+    impl HubWriter for RecordingHubWriter {
+        fn set_imap_last_uid(&self, hub_id: i32, uid: i32) -> RepositoryResult<()> {
+            self.calls
+                .lock()
+                .expect("lock poisoned")
+                .push((hub_id, uid));
+            Ok(())
         }
+    }
+
+    fn persist_uids_in_order(
+        repo: &(impl HubWriter + ?Sized),
+        hub_id: i32,
+        last_uid: &mut u32,
+        persisted_uid: &mut i32,
+        uids: impl IntoIterator<Item = u32>,
+    ) {
+        for uid in ordered_uids(uids) {
+            *last_uid = uid;
+            persist_last_processed_uid(repo, hub_id, persisted_uid, uid);
+        }
+    }
+
+    #[test]
+    fn advances_and_persists_single_uid() {
+        let repo = RecordingHubWriter::default();
+        let mut last_uid = 0_u32;
+        let mut persisted_uid = 0_i32;
+
+        persist_uids_in_order(&repo, 7, &mut last_uid, &mut persisted_uid, [42_u32]);
+
+        assert_eq!(last_uid, 42);
+        assert_eq!(persisted_uid, 42);
+        assert_eq!(
+            repo.calls.lock().expect("lock poisoned").as_slice(),
+            &[(7, 42)]
+        );
+    }
+
+    #[test]
+    fn processes_in_uid_order_and_persists_each_step() {
+        let repo = RecordingHubWriter::default();
+        let mut last_uid = 0_u32;
+        let mut persisted_uid = 0_i32;
+
+        persist_uids_in_order(
+            &repo,
+            1,
+            &mut last_uid,
+            &mut persisted_uid,
+            [5_u32, 3_u32, 4_u32],
+        );
+        assert_eq!(last_uid, 5);
+        assert_eq!(persisted_uid, 5);
+        assert_eq!(
+            repo.calls.lock().expect("lock poisoned").as_slice(),
+            &[(1, 3), (1, 4), (1, 5)]
+        );
     }
 }

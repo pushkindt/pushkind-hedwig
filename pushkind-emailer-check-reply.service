@@ -1,0 +1,38 @@
+[Unit]
+Description=pushkind-emailer check_reply (worker)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=www-data5
+Group=www-data
+
+WorkingDirectory=/var/www5/html
+Environment=APP_ENV=prod
+ExecStart=/var/www5/html/check_reply
+
+Restart=on-failure
+RestartSec=2
+
+KillMode=control-group
+KillSignal=SIGTERM
+TimeoutStopSec=15
+
+# Logging
+# StandardOutput=append:/var/log/pushkind/check_reply.log
+# StandardError=inherit
+
+# Security
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/www5/html
+AmbientCapabilities=
+CapabilityBoundingSet=
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target
+
