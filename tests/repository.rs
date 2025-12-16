@@ -4,9 +4,12 @@ use std::collections::HashMap;
 
 use diesel::{RunQueryDsl, connection::SimpleConnection};
 use pushkind_common::db::DbPool;
-use pushkind_common::domain::emailer::email::{NewEmail, NewEmailRecipient, UpdateEmailRecipient};
-use pushkind_common::models::emailer::hub::NewHub as DbNewHub;
-use pushkind_common::schema::emailer::hubs;
+use pushkind_emailer::domain::email::{NewEmail, NewEmailRecipient, UpdateEmailRecipient};
+use pushkind_emailer::domain::types::{
+    EmailBody, EmailId, EmailRecipientId, EmailRecipientReply, HubId, RecipientEmail, RecipientName,
+};
+use pushkind_emailer::models::hub::NewHub as DbNewHub;
+use pushkind_emailer::schema::hubs;
 use pushkind_hedwig::repository::{DieselRepository, EmailReader, EmailWriter, HubReader};
 use tempfile::TempDir;
 
@@ -52,20 +55,20 @@ fn insert_hub(pool: &DbPool) {
 
 fn create_email(repo: &DieselRepository) -> (i32, i32) {
     let new_email = NewEmail {
-        message: "Hello".into(),
-        subject: Some("Subject".into()),
+        message: EmailBody::new("Hello").unwrap(),
+        subject: Some("Subject".try_into().unwrap()),
         attachment: None,
         attachment_name: None,
         attachment_mime: None,
-        hub_id: 1,
+        hub_id: HubId::try_from(1).unwrap(),
         recipients: vec![NewEmailRecipient {
-            address: "to@example.com".into(),
-            name: "Alice".into(),
+            address: RecipientEmail::try_from("to@example.com").unwrap(),
+            name: RecipientName::new("Alice").unwrap(),
             fields: HashMap::new(),
         }],
     };
     let stored = repo.create_email(&new_email).unwrap();
-    (stored.email.id, stored.recipients[0].id)
+    (stored.email.id.get(), stored.recipients[0].id.get())
 }
 
 #[test]
@@ -75,9 +78,15 @@ fn create_and_get_email() {
     let repo = DieselRepository::new(pool.clone());
     let (email_id, recipient_id) = create_email(&repo);
 
-    let fetched = repo.get_email_by_id(email_id, 1).unwrap().unwrap();
+    let fetched = repo
+        .get_email_by_id(
+            EmailId::try_from(email_id).unwrap(),
+            HubId::try_from(1).unwrap(),
+        )
+        .unwrap()
+        .unwrap();
     assert_eq!(fetched.recipients.len(), 1);
-    assert_eq!(fetched.recipients[0].id, recipient_id);
+    assert_eq!(fetched.recipients[0].id.get(), recipient_id);
 }
 
 #[test]
@@ -87,13 +96,18 @@ fn list_and_get_recipient() {
     let repo = DieselRepository::new(pool.clone());
     let (email_id, recipient_id) = create_email(&repo);
 
-    let list = repo.list_not_replied_email_recipients(1).unwrap();
+    let list = repo
+        .list_not_replied_email_recipients(HubId::try_from(1).unwrap())
+        .unwrap();
     assert_eq!(list.len(), 1);
     let rec = repo
-        .get_email_recipient_by_id(recipient_id, 1)
+        .get_email_recipient_by_id(
+            EmailRecipientId::try_from(recipient_id).unwrap(),
+            HubId::try_from(1).unwrap(),
+        )
         .unwrap()
         .unwrap();
-    assert_eq!(rec.email_id, email_id);
+    assert_eq!(rec.email_id.get(), email_id);
 }
 
 #[test]
@@ -104,23 +118,32 @@ fn update_recipient_updates_stats() {
     let (email_id, recipient_id) = create_email(&repo);
 
     repo.update_recipient(
-        recipient_id,
+        EmailRecipientId::try_from(recipient_id).unwrap(),
         &UpdateEmailRecipient {
             is_sent: Some(true),
             opened: Some(true),
             replied: Some(true),
-            reply: Some("Thanks".into()),
+            reply: Some(EmailRecipientReply::try_from("Thanks").unwrap()),
         },
     )
     .unwrap();
 
-    let updated = repo.get_email_by_id(email_id, 1).unwrap().unwrap();
+    let updated = repo
+        .get_email_by_id(
+            EmailId::try_from(email_id).unwrap(),
+            HubId::try_from(1).unwrap(),
+        )
+        .unwrap()
+        .unwrap();
     let rec = &updated.recipients[0];
     assert!(rec.is_sent && rec.opened && rec.replied);
-    assert_eq!(rec.reply.as_deref(), Some("Thanks"));
-    assert_eq!(updated.email.num_sent, 1);
-    assert_eq!(updated.email.num_opened, 1);
-    assert_eq!(updated.email.num_replied, 1);
+    assert_eq!(
+        rec.reply.as_ref().map(|reply| reply.as_str()),
+        Some("Thanks")
+    );
+    assert_eq!(updated.email.num_sent.get(), 1);
+    assert_eq!(updated.email.num_opened.get(), 1);
+    assert_eq!(updated.email.num_replied.get(), 1);
 }
 
 #[test]
@@ -129,8 +152,11 @@ fn hub_queries() {
     insert_hub(&pool);
     let repo = DieselRepository::new(pool.clone());
 
-    let hub = repo.get_hub_by_id(1).unwrap().unwrap();
-    assert_eq!(hub.id, 1);
+    let hub = repo
+        .get_hub_by_id(HubId::try_from(1).unwrap())
+        .unwrap()
+        .unwrap();
+    assert_eq!(hub.id.get(), 1);
     let hubs = repo.list_hubs().unwrap();
     assert_eq!(hubs.len(), 1);
 }

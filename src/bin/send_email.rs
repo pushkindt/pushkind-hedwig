@@ -1,21 +1,56 @@
 use std::env;
 
+use config::Config;
 use dotenvy::dotenv;
-use pushkind_hedwig::send_email;
+
+use pushkind_hedwig::{models::ServerConfig, send_email};
 
 /// Entry point for the email sender worker.
 #[tokio::main]
 async fn main() {
-    env_logger::init_from_env(env_logger::Env::default().default_filter_or("info"));
+    // Load environment variables from `.env` in local development.
     dotenv().ok();
+    // Initialize logger with default level INFO if not provided.
+    env_logger::init_from_env(env_logger::Env::default().default_filter_or("info"));
+
     rustls::crypto::CryptoProvider::install_default(rustls::crypto::aws_lc_rs::default_provider())
         .expect("Could not install default crypto provider.");
 
-    let database_url = env::var("DATABASE_URL").unwrap_or("app.db".to_string());
-    let domain = env::var("DOMAIN").unwrap_or_default();
-    let zmq_address = env::var("ZMQ_EMAILER_SUB").unwrap_or("tcp://127.0.0.1:5558".to_string());
+    // Select config profile (defaults to `local`).
+    let app_env = env::var("APP_ENV").unwrap_or_else(|_| "local".into());
 
-    if let Err(e) = send_email::run(&database_url, &domain, &zmq_address).await {
+    let settings = Config::builder()
+        // Add `./config/default.yaml`
+        .add_source(config::File::with_name("config/default"))
+        // Add environment-specific overrides
+        .add_source(config::File::with_name(&format!("config/{}", app_env)).required(false))
+        // Add settings from the environment (with a prefix of APP)
+        .add_source(config::Environment::with_prefix("APP"))
+        .build();
+
+    let settings = match settings {
+        Ok(settings) => settings,
+        Err(err) => {
+            log::error!("Error loading settings: {}", err);
+            std::process::exit(1);
+        }
+    };
+
+    let server_config = match settings.try_deserialize::<ServerConfig>() {
+        Ok(server_config) => server_config,
+        Err(err) => {
+            log::error!("Error loading server config: {}", err);
+            std::process::exit(1);
+        }
+    };
+
+    if let Err(e) = send_email::run(
+        &server_config.database_url,
+        &server_config.domain,
+        &server_config.zmq_emailer_sub,
+    )
+    .await
+    {
         log::error!("{e}");
         std::process::exit(1);
     }

@@ -1,0 +1,6 @@
+domain: ""
+database_url: ../pushkind-emailer/app.db
+zmq_emailer_pub: tcp://127.0.0.1:5557
+zmq_emailer_sub: tcp://127.0.0.1:5558
+zmq_replier_pub: tcp://127.0.0.1:5559
+zmq_replier_sub: tcp://127.0.0.1:5560
