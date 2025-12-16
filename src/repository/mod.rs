@@ -5,11 +5,12 @@
 //! connection pool.
 
 use pushkind_common::db::{DbConnection, DbPool};
-use pushkind_common::domain::emailer::email::{
+use pushkind_common::repository::errors::RepositoryResult;
+use pushkind_emailer::domain::email::{
     EmailRecipient, EmailWithRecipients, NewEmail, UpdateEmailRecipient,
 };
-use pushkind_common::domain::emailer::hub::Hub;
-use pushkind_common::repository::errors::RepositoryResult;
+use pushkind_emailer::domain::hub::Hub;
+use pushkind_emailer::domain::types::{EmailId, EmailRecipientId, HubId, ImapUid};
 
 pub mod email;
 pub mod hub;
@@ -36,21 +37,21 @@ pub trait EmailReader {
     /// Fetches an email with its recipients by ID constrained by `hub_id`.
     fn get_email_by_id(
         &self,
-        id: i32,
-        hub_id: i32,
+        id: EmailId,
+        hub_id: HubId,
     ) -> RepositoryResult<Option<EmailWithRecipients>>;
 
     /// Lists recipients that have not replied within the hub.
     fn list_not_replied_email_recipients(
         &self,
-        hub_id: i32,
+        hub_id: HubId,
     ) -> RepositoryResult<Vec<EmailRecipient>>;
 
     /// Retrieves a recipient by ID if it belongs to the hub.
     fn get_email_recipient_by_id(
         &self,
-        id: i32,
-        hub_id: i32,
+        id: EmailRecipientId,
+        hub_id: HubId,
     ) -> RepositoryResult<Option<EmailRecipient>>;
 }
 
@@ -63,10 +64,11 @@ pub trait EmailWriter {
     ///
     /// # Example
     /// ```no_run
-    /// use pushkind_common::domain::emailer::email::UpdateEmailRecipient;
+    /// use pushkind_emailer::domain::email::UpdateEmailRecipient;
+    /// use pushkind_emailer::domain::types::EmailRecipientId;
     /// use pushkind_hedwig::repository::{DieselRepository, EmailWriter};
     /// # fn demo(repo: &DieselRepository) {
-    /// let _ = repo.update_recipient(1, &UpdateEmailRecipient {
+    /// let _ = repo.update_recipient(EmailRecipientId::try_from(1).unwrap(), &UpdateEmailRecipient {
     ///     is_sent: Some(true),
     ///     replied: None,
     ///     opened: None,
@@ -76,13 +78,13 @@ pub trait EmailWriter {
     /// ```
     fn update_recipient(
         &self,
-        recipient_id: i32,
+        recipient_id: EmailRecipientId,
         updates: &UpdateEmailRecipient,
     ) -> RepositoryResult<EmailWithRecipients>;
     fn unsubscribe_recipient(
         &self,
         email: &str,
-        hub_id: i32,
+        hub_id: HubId,
         reason: Option<&str>,
     ) -> RepositoryResult<()>;
 }
@@ -90,7 +92,7 @@ pub trait EmailWriter {
 /// Read-only operations for hubs.
 pub trait HubReader {
     /// Retrieves a hub by its identifier.
-    fn get_hub_by_id(&self, id: i32) -> RepositoryResult<Option<Hub>>;
+    fn get_hub_by_id(&self, id: HubId) -> RepositoryResult<Option<Hub>>;
 
     /// Lists all hubs stored in the repository.
     fn list_hubs(&self) -> RepositoryResult<Vec<Hub>>;
@@ -99,5 +101,5 @@ pub trait HubReader {
 /// Write operations for hub entities.
 pub trait HubWriter {
     /// Persists the latest seen IMAP UID for the hub.
-    fn set_imap_last_uid(&self, hub_id: i32, uid: i32) -> RepositoryResult<()>;
+    fn set_imap_last_uid(&self, hub_id: HubId, uid: ImapUid) -> RepositoryResult<()>;
 }

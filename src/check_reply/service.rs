@@ -2,10 +2,11 @@ use std::collections::HashSet;
 use std::convert::TryFrom;
 
 use async_imap::Session;
-use pushkind_common::domain::emailer::email::{EmailRecipient, UpdateEmailRecipient};
-use pushkind_common::domain::emailer::hub::Hub;
-use pushkind_common::models::emailer::zmq::{ZMQReplyMessage, ZMQUnsubscribeMessage};
-use pushkind_common::zmq::ZmqSender;
+use pushkind_common::zmq::{ZmqSender, ZmqSenderExt};
+use pushkind_emailer::domain::email::{EmailRecipient, UpdateEmailRecipient};
+use pushkind_emailer::domain::hub::Hub;
+use pushkind_emailer::domain::types::{EmailRecipientId, EmailRecipientReply, HubId, ImapUid};
+use pushkind_emailer::models::zmq::{ZMQReplyMessage, ZMQUnsubscribeMessage};
 use tokio::net::TcpStream;
 use tokio::time::{Duration, sleep};
 use tokio_rustls::client::TlsStream;
@@ -19,7 +20,7 @@ use super::parser::parse_email;
 async fn send_unsubscribe_message(
     repo: &(impl EmailWriter + ?Sized),
     zmq_sender: &ZmqSender,
-    hub_id: i32,
+    hub_id: HubId,
     email: String,
     reason: Option<String>,
 ) {
@@ -31,7 +32,7 @@ async fn send_unsubscribe_message(
     }
 
     let message = ZMQUnsubscribeMessage {
-        hub_id,
+        hub_id: hub_id.get(),
         email: email.clone(),
         reason,
     };
@@ -46,13 +47,13 @@ async fn send_unsubscribe_message(
 
 async fn send_reply_message(
     zmq_sender: &ZmqSender,
-    hub_id: i32,
+    hub_id: HubId,
     email: &str,
     reply: Option<&str>,
     subject: Option<&str>,
 ) {
     let message = ZMQReplyMessage {
-        hub_id,
+        hub_id: hub_id.get(),
         email: email.to_owned(),
         message: reply.unwrap_or_default().to_string(),
         subject: subject.map(str::to_string),
@@ -73,6 +74,18 @@ pub async fn process_reply(
     recipient: &EmailRecipient,
     reply: Option<String>,
 ) {
+    let reply = reply.and_then(|reply| match EmailRecipientReply::try_from(reply) {
+        Ok(reply) => Some(reply),
+        Err(err) => {
+            log::warn!(
+                "Skipping invalid reply for recipient {}: {}",
+                recipient.id,
+                err
+            );
+            None
+        }
+    });
+
     if let Err(e) = repo.update_recipient(
         recipient.id,
         &UpdateEmailRecipient {
@@ -93,7 +106,7 @@ pub async fn process_new_message(
     session: &mut Session<TlsStream<TcpStream>>,
     uid: u32,
     domain: &str,
-    hub_id: i32,
+    hub_id: HubId,
     zmq_sender: &ZmqSender,
 ) {
     let raw_message = match fetch_message_rfc822(session, uid).await {
@@ -144,18 +157,31 @@ pub async fn process_new_message(
 
     if let Some(recipient_id) = parsed.recipient_id {
         let reply = parsed.reply.clone();
+        let recipient_id = match EmailRecipientId::try_from(recipient_id) {
+            Ok(id) => id,
+            Err(err) => {
+                log::warn!(
+                    "Skipping recipient id {} in hub#{}: {}",
+                    recipient_id,
+                    hub_id,
+                    err
+                );
+                return;
+            }
+        };
+
         match repo.get_email_recipient_by_id(recipient_id, hub_id) {
             Ok(Some(recipient)) => {
                 process_reply(repo, &recipient, reply).await;
             }
             Ok(None) => log::warn!(
                 "Recipient not found for id {} in hub#{}",
-                recipient_id,
+                recipient_id.get(),
                 hub_id,
             ),
             Err(e) => log::error!(
                 "Failed to load recipient id {} in hub#{}: {}",
-                recipient_id,
+                recipient_id.get(),
                 hub_id,
                 e,
             ),
@@ -176,8 +202,8 @@ pub async fn process_new_message(
 
 fn persist_last_processed_uid(
     repo: &(impl HubWriter + ?Sized),
-    hub_id: i32,
-    stored_uid: &mut i32,
+    hub_id: HubId,
+    stored_uid: &mut ImapUid,
     candidate_uid: u32,
 ) {
     let Ok(new_uid) = i32::try_from(candidate_uid) else {
@@ -189,18 +215,35 @@ fn persist_last_processed_uid(
         return;
     };
 
-    if new_uid <= *stored_uid {
+    let new_uid = match ImapUid::try_from(new_uid) {
+        Ok(uid) => uid,
+        Err(err) => {
+            log::warn!(
+                "Skipping IMAP UID persistence for hub#{} because {} is invalid: {}",
+                hub_id,
+                candidate_uid,
+                err
+            );
+            return;
+        }
+    };
+
+    if new_uid.get() <= stored_uid.get() {
         return;
     }
 
     match repo.set_imap_last_uid(hub_id, new_uid) {
         Ok(_) => {
             *stored_uid = new_uid;
-            log::debug!("Persisted IMAP last UID {} for hub#{}", new_uid, hub_id);
+            log::debug!(
+                "Persisted IMAP last UID {} for hub#{}",
+                stored_uid.get(),
+                hub_id
+            );
         }
         Err(err) => log::error!(
             "Cannot persist IMAP last UID {} for hub#{}: {}",
-            new_uid,
+            new_uid.get(),
             hub_id,
             err
         ),
@@ -221,9 +264,12 @@ pub async fn monitor_hub(
 ) -> Result<(), Error> {
     let (imap_server, imap_port, username, password) =
         match (&hub.imap_server, hub.imap_port, &hub.login, &hub.password) {
-            (Some(server), Some(port), Some(username), Some(password)) => {
-                (server, port as u16, username, password)
-            }
+            (Some(server), Some(port), Some(username), Some(password)) => (
+                server.as_str(),
+                port.get(),
+                username.as_str(),
+                password.as_str(),
+            ),
             _ => {
                 return Err(Error::Config(format!(
                     "Cannot get imap server and port for the hub#{}",
@@ -234,7 +280,7 @@ pub async fn monitor_hub(
 
     let mut session = init_session(imap_server, imap_port, username, password).await?;
 
-    let mut last_uid: u32 = hub.imap_last_uid.max(0) as u32;
+    let mut last_uid: u32 = hub.imap_last_uid.get() as u32;
     let mut persisted_uid = hub.imap_last_uid;
 
     let initial_search = format!("UID {}:*", last_uid.saturating_add(1));
@@ -317,15 +363,16 @@ pub async fn monitor_hub(
 mod tests {
     use super::*;
     use pushkind_common::repository::errors::RepositoryResult;
+    use pushkind_emailer::domain::types::{HubId, ImapUid};
     use std::sync::{Arc, Mutex};
 
     #[derive(Clone, Default)]
     struct RecordingHubWriter {
-        calls: Arc<Mutex<Vec<(i32, i32)>>>,
+        calls: Arc<Mutex<Vec<(HubId, ImapUid)>>>,
     }
 
     impl HubWriter for RecordingHubWriter {
-        fn set_imap_last_uid(&self, hub_id: i32, uid: i32) -> RepositoryResult<()> {
+        fn set_imap_last_uid(&self, hub_id: HubId, uid: ImapUid) -> RepositoryResult<()> {
             self.calls
                 .lock()
                 .expect("lock poisoned")
@@ -336,9 +383,9 @@ mod tests {
 
     fn persist_uids_in_order(
         repo: &(impl HubWriter + ?Sized),
-        hub_id: i32,
+        hub_id: HubId,
         last_uid: &mut u32,
-        persisted_uid: &mut i32,
+        persisted_uid: &mut ImapUid,
         uids: impl IntoIterator<Item = u32>,
     ) {
         for uid in ordered_uids(uids) {
@@ -351,15 +398,21 @@ mod tests {
     fn advances_and_persists_single_uid() {
         let repo = RecordingHubWriter::default();
         let mut last_uid = 0_u32;
-        let mut persisted_uid = 0_i32;
+        let mut persisted_uid = ImapUid::try_from(0).unwrap();
 
-        persist_uids_in_order(&repo, 7, &mut last_uid, &mut persisted_uid, [42_u32]);
+        persist_uids_in_order(
+            &repo,
+            HubId::try_from(7).unwrap(),
+            &mut last_uid,
+            &mut persisted_uid,
+            [42_u32],
+        );
 
         assert_eq!(last_uid, 42);
-        assert_eq!(persisted_uid, 42);
+        assert_eq!(persisted_uid.get(), 42);
         assert_eq!(
             repo.calls.lock().expect("lock poisoned").as_slice(),
-            &[(7, 42)]
+            &[(HubId::try_from(7).unwrap(), ImapUid::try_from(42).unwrap())]
         );
     }
 
@@ -367,20 +420,24 @@ mod tests {
     fn processes_in_uid_order_and_persists_each_step() {
         let repo = RecordingHubWriter::default();
         let mut last_uid = 0_u32;
-        let mut persisted_uid = 0_i32;
+        let mut persisted_uid = ImapUid::try_from(0).unwrap();
 
         persist_uids_in_order(
             &repo,
-            1,
+            HubId::try_from(1).unwrap(),
             &mut last_uid,
             &mut persisted_uid,
             [5_u32, 3_u32, 4_u32],
         );
         assert_eq!(last_uid, 5);
-        assert_eq!(persisted_uid, 5);
+        assert_eq!(persisted_uid.get(), 5);
         assert_eq!(
             repo.calls.lock().expect("lock poisoned").as_slice(),
-            &[(1, 3), (1, 4), (1, 5)]
+            &[
+                (HubId::try_from(1).unwrap(), ImapUid::try_from(3).unwrap()),
+                (HubId::try_from(1).unwrap(), ImapUid::try_from(4).unwrap()),
+                (HubId::try_from(1).unwrap(), ImapUid::try_from(5).unwrap())
+            ]
         );
     }
 }

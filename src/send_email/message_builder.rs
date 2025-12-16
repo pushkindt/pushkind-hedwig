@@ -3,8 +3,8 @@ use mail_send::mail_builder::{
     headers::{HeaderType, url::URL},
 };
 use once_cell::sync::Lazy;
-use pushkind_common::domain::emailer::email::{Email, EmailRecipient};
-use pushkind_common::domain::emailer::hub::Hub;
+use pushkind_emailer::domain::email::{Email, EmailRecipient};
+use pushkind_emailer::domain::hub::Hub;
 use regex::Regex;
 use std::collections::HashMap;
 
@@ -34,10 +34,14 @@ pub fn build_message<'a>(
     domain: &'a str,
 ) -> MessageBuilder<'a> {
     // 1) Render the inner message with recipient fields
-    let rendered_message = fill_template(&email.message, &recipient.fields);
+    let rendered_message = fill_template(email.message.as_str(), &recipient.fields);
 
     // 2) Ensure outer template has {message}
-    let template = hub.email_template.as_deref().unwrap_or("{message}");
+    let template = hub
+        .email_template
+        .as_ref()
+        .map(|template| template.as_str())
+        .unwrap_or("{message}");
     let template = match template.contains("{message}") {
         true => template.to_string(),
         false => {
@@ -50,7 +54,7 @@ pub fn build_message<'a>(
     // 3) Build fields for the outer template
     let unsubscribe_url = hub.unsubscribe_url();
     let mut fields: HashMap<String, String> = HashMap::new();
-    fields.insert("name".into(), recipient.name.clone());
+    fields.insert("name".into(), recipient.name.as_str().to_string());
     fields.insert("unsubscribe_url".into(), unsubscribe_url.clone());
     fields.insert("message".into(), rendered_message);
 
@@ -59,15 +63,27 @@ pub fn build_message<'a>(
 
     body.push_str(&format!(
         r#"<img height="1" width="1" border="0" src="https://mail.{domain}/track/{}">"#,
-        recipient.id
+        recipient.id.get()
     ));
 
-    let message_id = format!("{}@{}", recipient.id, domain);
+    let message_id = format!("{}@{}", recipient.id.get(), domain);
 
     let recipient_address = vec![("", recipient.address.as_str())];
-    let sender_email = hub.sender.as_deref().unwrap_or_default();
-    let sender_login = hub.login.as_deref().unwrap_or_default();
-    let subject = email.subject.as_deref().unwrap_or_default();
+    let sender_email = hub
+        .sender
+        .as_ref()
+        .map(|sender| sender.as_str())
+        .unwrap_or_default();
+    let sender_login = hub
+        .login
+        .as_ref()
+        .map(|login| login.as_str())
+        .unwrap_or_default();
+    let subject = email
+        .subject
+        .as_ref()
+        .map(|subject| subject.as_str())
+        .unwrap_or_default();
 
     let mut message = MessageBuilder::new()
         .from((sender_email, sender_login))
@@ -82,8 +98,8 @@ pub fn build_message<'a>(
         );
 
     if let (Some(mime), Some(name), Some(content)) = (
-        email.attachment_mime.as_deref(),
-        email.attachment_name.as_deref(),
+        email.attachment_mime.as_ref().map(|mime| mime.as_str()),
+        email.attachment_name.as_ref().map(|name| name.as_str()),
         email.attachment.as_deref(),
     ) && !name.is_empty()
         && !content.is_empty()
@@ -98,57 +114,62 @@ pub fn build_message<'a>(
 mod tests {
     use super::*;
     use chrono::Utc;
+    use pushkind_emailer::domain::email::{Email, EmailRecipient};
+    use pushkind_emailer::domain::hub::Hub;
 
     fn sample_hub() -> Hub {
-        Hub {
-            id: 1,
-            login: Some("sender@example.com".into()),
-            password: None,
-            sender: Some("sender@example.com".into()),
-            smtp_server: None,
-            smtp_port: None,
-            created_at: None,
-            updated_at: None,
-            imap_server: None,
-            imap_port: None,
-            email_template: Some("Hi {name}! {message} Unsubscribe: {unsubscribe_url}".into()),
-            imap_last_uid: 0,
-        }
+        Hub::try_new(
+            1,
+            Some("sender@example.com".to_string()),
+            None,
+            Some("sender@example.com".to_string()),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some("Hi {name}! {message} Unsubscribe: {unsubscribe_url}".to_string()),
+            0,
+        )
+        .unwrap()
     }
 
     fn sample_email() -> Email {
-        Email {
-            id: 1,
-            message: "Hello {favorite_color}, I have {favourite fruit}".into(),
-            created_at: Utc::now().naive_utc(),
-            is_sent: false,
-            subject: Some("Subject".into()),
-            attachment: None,
-            attachment_name: None,
-            attachment_mime: None,
-            num_sent: 0,
-            num_opened: 0,
-            num_replied: 0,
-            hub_id: 1,
-        }
+        Email::try_new(
+            1,
+            "Hello {favorite_color}, I have {favourite fruit}",
+            Utc::now().naive_utc(),
+            false,
+            Some("Subject".to_string()),
+            None,
+            None,
+            None,
+            0,
+            0,
+            0,
+            1,
+        )
+        .unwrap()
     }
 
     fn sample_recipient() -> EmailRecipient {
         let mut fields = HashMap::new();
         fields.insert("favorite_color".into(), "blue".into());
 
-        EmailRecipient {
-            id: 1,
-            email_id: 1,
-            address: "to@example.com".into(),
-            opened: false,
-            updated_at: Utc::now().naive_utc(),
-            is_sent: false,
-            replied: false,
-            name: "Alice".into(),
+        EmailRecipient::try_new(
+            1,
+            1,
+            "to@example.com",
+            false,
+            Utc::now().naive_utc(),
+            false,
+            false,
+            None,
+            "Alice",
             fields,
-            reply: None,
-        }
+        )
+        .unwrap()
     }
 
     #[test]
@@ -174,8 +195,8 @@ mod tests {
         let hub = sample_hub();
         let mut email = sample_email();
         email.attachment = Some(b"data".to_vec());
-        email.attachment_name = Some("file.txt".into());
-        email.attachment_mime = Some("text/plain".into());
+        email.attachment_name = Some("file.txt".try_into().unwrap());
+        email.attachment_mime = Some("text/plain".try_into().unwrap());
         let recipient = sample_recipient();
 
         let builder = build_message(&hub, &email, &recipient, "example.com");

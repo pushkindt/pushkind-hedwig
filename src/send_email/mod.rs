@@ -7,8 +7,8 @@ use async_trait::async_trait;
 use mail_send::SmtpClientBuilder;
 use mail_send::mail_builder::MessageBuilder;
 use pushkind_common::db::establish_connection_pool;
-use pushkind_common::domain::emailer::hub::Hub;
-use pushkind_common::models::emailer::zmq::ZMQSendEmailMessage;
+use pushkind_emailer::domain::hub::Hub;
+use pushkind_emailer::models::zmq::ZMQSendEmailMessage;
 
 use crate::errors::Error;
 use crate::repository::DieselRepository;
@@ -23,14 +23,22 @@ impl Mailer for SmtpMailer {
     async fn send(&self, hub: &Hub, message: MessageBuilder<'_>) -> Result<(), Error> {
         let smtp_server = hub
             .smtp_server
-            .as_deref()
+            .as_ref()
+            .map(|host| host.as_str())
             .ok_or(Error::Config("Missed SMTP server address".to_owned()))?;
         let smtp_port = hub
             .smtp_port
-            .ok_or(Error::Config("Missed SMTP port".to_owned()))? as u16;
+            .ok_or(Error::Config("Missed SMTP port".to_owned()))?
+            .get();
         let credentials = (
-            hub.login.as_deref().unwrap_or_default(),
-            hub.password.as_deref().unwrap_or_default(),
+            hub.login
+                .as_ref()
+                .map(|login| login.as_str())
+                .unwrap_or_default(),
+            hub.password
+                .as_ref()
+                .map(|password| password.as_str())
+                .unwrap_or_default(),
         );
 
         SmtpClientBuilder::new(smtp_server, smtp_port)

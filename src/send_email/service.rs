@@ -1,8 +1,9 @@
 use async_trait::async_trait;
 use mail_send::mail_builder::MessageBuilder;
-use pushkind_common::domain::emailer::email::UpdateEmailRecipient;
-use pushkind_common::domain::emailer::hub::Hub;
-use pushkind_common::models::emailer::zmq::ZMQSendEmailMessage;
+use pushkind_emailer::domain::email::UpdateEmailRecipient;
+use pushkind_emailer::domain::hub::Hub;
+use pushkind_emailer::domain::types::{EmailId, HubId};
+use pushkind_emailer::models::zmq::ZMQSendEmailMessage;
 
 use crate::errors::Error;
 use crate::repository::{EmailReader, EmailWriter, HubReader};
@@ -30,6 +31,11 @@ where
 {
     let email = match msg {
         ZMQSendEmailMessage::RetryEmail((email_id, hub_id)) => {
+            let email_id = EmailId::try_from(email_id)
+                .map_err(|e| Error::Config(format!("Invalid email_id {email_id}: {e}")))?;
+            let hub_id = HubId::try_from(hub_id)
+                .map_err(|e| Error::Config(format!("Invalid hub_id {hub_id}: {e}")))?;
+
             match repo.get_email_by_id(email_id, hub_id)? {
                 Some(email) => email,
                 None => {
@@ -110,9 +116,12 @@ mod tests {
     use crate::repository::DieselRepository;
     use diesel::{RunQueryDsl, connection::SimpleConnection};
     use pushkind_common::db::establish_connection_pool;
-    use pushkind_common::domain::emailer::email::{NewEmail, NewEmailRecipient};
-    use pushkind_common::models::emailer::hub::NewHub as DbNewHub;
-    use pushkind_common::schema::emailer::hubs;
+    use pushkind_emailer::domain::email::{NewEmail, NewEmailRecipient};
+    use pushkind_emailer::domain::types::{
+        EmailBody, EmailRecipientId, HubId, RecipientEmail, RecipientName,
+    };
+    use pushkind_emailer::models::hub::NewHub as DbNewHub;
+    use pushkind_emailer::schema::hubs;
     use tempfile::TempDir;
 
     struct MockMailer {
@@ -170,20 +179,20 @@ mod tests {
 
     fn create_email(repo: &DieselRepository) -> (i32, i32) {
         let new_email = NewEmail {
-            message: "Hello".into(),
+            message: EmailBody::new("Hello").unwrap(),
             subject: None,
             attachment: None,
             attachment_name: None,
             attachment_mime: None,
-            hub_id: 1,
+            hub_id: HubId::try_from(1).unwrap(),
             recipients: vec![NewEmailRecipient {
-                address: "to@example.com".into(),
-                name: "".to_string(),
+                address: RecipientEmail::try_from("to@example.com").unwrap(),
+                name: RecipientName::new("Alice").unwrap(),
                 fields: HashMap::new(),
             }],
         };
         let stored = repo.create_email(&new_email).unwrap();
-        (stored.email.id, stored.recipients[0].id)
+        (stored.email.id.get(), stored.recipients[0].id.get())
     }
 
     #[tokio::test]
@@ -204,7 +213,10 @@ mod tests {
         assert_eq!(mailer.calls.load(Ordering::SeqCst), 1);
 
         let updated = repo
-            .get_email_recipient_by_id(recipient_id, 1)
+            .get_email_recipient_by_id(
+                EmailRecipientId::try_from(recipient_id).unwrap(),
+                HubId::try_from(1).unwrap(),
+            )
             .unwrap()
             .unwrap();
         assert!(updated.is_sent);
@@ -228,7 +240,10 @@ mod tests {
         assert_eq!(mailer.calls.load(Ordering::SeqCst), 0);
 
         let updated = repo
-            .get_email_recipient_by_id(recipient_id, 1)
+            .get_email_recipient_by_id(
+                EmailRecipientId::try_from(recipient_id).unwrap(),
+                HubId::try_from(1).unwrap(),
+            )
             .unwrap()
             .unwrap();
         assert!(!updated.is_sent);
