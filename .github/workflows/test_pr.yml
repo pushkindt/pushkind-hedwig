@@ -1,4 +1,4 @@
-name: Test and lint PRs
+name: Rust
 
 on:
   pull_request:
@@ -8,49 +8,44 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  build:
+  test:
+    name: Test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0  # needed for diff
-
-      # Decide if Rust/Cargo files changed
-      - name: Detect changed paths
-        id: filter
-        uses: dorny/paths-filter@v3
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-          filters: |
-            rust:
-              - '**/*.rs'
-            cargo:
-              - 'Cargo.toml'
-              - 'Cargo.lock'
-
-      # Quick no-op so the job still succeeds when nothing relevant changed
-      - name: No Rust changes — skipping clippy/test
-        if: ${{ steps.filter.outputs.rust != 'true' && steps.filter.outputs.cargo != 'true' }}
-        run: |
-          echo "No .rs or Cargo* changes in this PR. Skipping clippy/test."
-
-      # Toolchain only if needed
-      - name: Install Rust toolchain
-        if: ${{ steps.filter.outputs.rust == 'true' || steps.filter.outputs.cargo == 'true' }}
-        uses: actions-rs/toolchain@v1
-        with:
-          toolchain: stable
-
-      - name: Run clippy
-        if: ${{ steps.filter.outputs.rust == 'true' || steps.filter.outputs.cargo == 'true' }}
-        uses: actions-rs/cargo@v1
-        with:
-          command: clippy
-          args: --all-targets --all-features -- -D warnings
-
+      - uses: actions/checkout@v3
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
       - name: Run tests
-        if: ${{ steps.filter.outputs.rust == 'true' || steps.filter.outputs.cargo == 'true' }}
-        uses: actions-rs/cargo@v1
+        run: cargo test
+
+  fmt:
+    name: Rustfmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - uses: dtolnay/rust-toolchain@stable
         with:
-          command: test
-          args: --all-targets --all-features
+          components: rustfmt
+      - name: Enforce formatting
+        run: cargo fmt --check
+
+  clippy:
+    name: Clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Linting
+        run: cargo clippy -- -D warnings
+
+  security_audit:
+    name: Security audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - uses: taiki-e/install-action@cargo-deny
+      - name: Scan for vulnerabilities
+        run: cargo deny check advisories
