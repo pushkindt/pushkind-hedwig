@@ -43,9 +43,9 @@ jobs:
           if_key_exists: fail # replace / ignore / fail; optional (defaults to fail)
       - name: Deploy
         run: |
-          ssh cicd@mail.pushkind.com "supervisorctl stop emailer_send_email"
-          ssh cicd@mail.pushkind.com "supervisorctl stop emailer_check_reply"
+          ssh cicd@mail.pushkind.com "sudo /usr/bin/systemctl stop pushkind-emailer-send-email.service"
+          ssh cicd@mail.pushkind.com "sudo /usr/bin/systemctl stop pushkind-emailer-check-reply.service"
           scp ./target/release/send_email cicd@mail.pushkind.com:/var/www5/html/
           scp ./target/release/check_reply cicd@mail.pushkind.com:/var/www5/html/
-          ssh cicd@mail.pushkind.com "supervisorctl start emailer_send_email"
-          ssh cicd@mail.pushkind.com "supervisorctl start emailer_check_reply"
+          ssh cicd@mail.pushkind.com "sudo /usr/bin/systemctl start pushkind-emailer-send-email.service"
+          ssh cicd@mail.pushkind.com "sudo /usr/bin/systemctl start pushkind-emailer-check-reply.service"
