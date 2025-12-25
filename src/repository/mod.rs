@@ -6,11 +6,11 @@
 
 use pushkind_common::db::{DbConnection, DbPool};
 use pushkind_common::repository::errors::RepositoryResult;
-use pushkind_emailer::domain::email::{
-    EmailRecipient, EmailWithRecipients, NewEmail, UpdateEmailRecipient,
-};
+use pushkind_emailer::domain::email::{EmailRecipient, EmailWithRecipients, NewEmail};
 use pushkind_emailer::domain::hub::Hub;
 use pushkind_emailer::domain::types::{EmailId, EmailRecipientId, HubId, ImapUid};
+
+use crate::domain::UpdateEmailRecipient;
 
 pub mod email;
 pub mod hub;
@@ -64,13 +64,12 @@ pub trait EmailWriter {
     ///
     /// # Example
     /// ```no_run
-    /// use pushkind_emailer::domain::email::UpdateEmailRecipient;
+    /// use pushkind_hedwig::domain::UpdateEmailRecipient;
     /// use pushkind_emailer::domain::types::EmailRecipientId;
     /// use pushkind_hedwig::repository::{DieselRepository, EmailWriter};
     /// # fn demo(repo: &DieselRepository) {
     /// let _ = repo.update_recipient(EmailRecipientId::try_from(1).unwrap(), &UpdateEmailRecipient {
-    ///     is_sent: Some(true),
-    ///     replied: None,
+    ///     sent: Some(true),
     ///     opened: None,
     ///     reply: None,
     /// });

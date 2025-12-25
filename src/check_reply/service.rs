@@ -3,7 +3,7 @@ use std::convert::TryFrom;
 
 use async_imap::Session;
 use pushkind_common::zmq::{ZmqSender, ZmqSenderExt};
-use pushkind_emailer::domain::email::{EmailRecipient, UpdateEmailRecipient};
+use pushkind_emailer::domain::email::EmailRecipient;
 use pushkind_emailer::domain::hub::Hub;
 use pushkind_emailer::domain::types::{EmailRecipientId, EmailRecipientReply, HubId, ImapUid};
 use pushkind_emailer::models::zmq::{ZMQReplyMessage, ZMQUnsubscribeMessage};
@@ -11,6 +11,7 @@ use tokio::net::TcpStream;
 use tokio::time::{Duration, sleep};
 use tokio_rustls::client::TlsStream;
 
+use crate::domain::UpdateEmailRecipient;
 use crate::errors::Error;
 use crate::repository::{DieselRepository, EmailReader, EmailWriter, HubWriter};
 
@@ -89,10 +90,9 @@ pub async fn process_reply(
     if let Err(e) = repo.update_recipient(
         recipient.id,
         &UpdateEmailRecipient {
-            is_sent: Some(true),
-            replied: Some(true),
+            sent: Some(true),
             opened: Some(true),
-            reply,
+            reply: reply.as_ref(),
         },
     ) {
         log::error!("Cannot set email recipient replied status: {e}");

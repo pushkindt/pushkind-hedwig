@@ -6,12 +6,12 @@ use once_cell::sync::Lazy;
 use pushkind_emailer::domain::email::{Email, EmailRecipient};
 use pushkind_emailer::domain::hub::Hub;
 use regex::Regex;
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 /// Replace {key} with values from `vars`; leave unknown {key} intact.
 static PLACEHOLDER_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"\{([\p{L}\p{N}_]+?)\}").unwrap());
 
-fn fill_template(template: &str, vars: &HashMap<String, String>) -> String {
+fn fill_template(template: &str, vars: &BTreeMap<String, String>) -> String {
     PLACEHOLDER_RE
         .replace_all(template, |caps: &regex::Captures| {
             let key = &caps[1];
@@ -53,7 +53,7 @@ pub fn build_message<'a>(
 
     // 3) Build fields for the outer template
     let unsubscribe_url = hub.unsubscribe_url();
-    let mut fields: HashMap<String, String> = HashMap::new();
+    let mut fields: BTreeMap<String, String> = BTreeMap::new();
     fields.insert("name".into(), recipient.name.as_str().to_string());
     fields.insert("unsubscribe_url".into(), unsubscribe_url.clone());
     fields.insert("message".into(), rendered_message);
@@ -154,7 +154,7 @@ mod tests {
     }
 
     fn sample_recipient() -> EmailRecipient {
-        let mut fields = HashMap::new();
+        let mut fields = BTreeMap::new();
         fields.insert("favorite_color".into(), "blue".into());
 
         EmailRecipient::try_new(
@@ -163,7 +163,6 @@ mod tests {
             "to@example.com",
             false,
             Utc::now().naive_utc(),
-            false,
             false,
             None,
             "Alice",

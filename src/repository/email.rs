@@ -3,21 +3,32 @@
 //! Provides [`EmailReader`] and [`EmailWriter`] trait implementations for
 //! [`DieselRepository`].
 
+use chrono::Utc;
 use diesel::prelude::*;
 use pushkind_common::repository::errors::{RepositoryError, RepositoryResult};
 use pushkind_emailer::domain::email::{
     Email as DomainEmail, EmailRecipient as DomainEmailRecipient,
     EmailWithRecipients as DomainEmailWithRecipients, NewEmail as DomainNewEmail,
-    UpdateEmailRecipient as DomainUpdateEmailRecipient,
 };
 use pushkind_emailer::domain::types::{EmailId, EmailRecipientId, HubId};
 use pushkind_emailer::models::email::{
     Email as DbEmail, EmailRecipient as DbEmailRecipient, NewEmail as DbNewEmail,
-    NewEmailRecipient as DbNewEmailRecipient, UpdateEmailRecipient as DbUpdateEmailRecipient,
+    NewEmailRecipient as DbNewEmailRecipient,
 };
+use pushkind_emailer::schema::email_recipients;
 
+use crate::domain::UpdateEmailRecipient;
 use crate::models::Unsubscribe;
 use crate::repository::{DieselRepository, EmailReader, EmailWriter};
+
+#[derive(AsChangeset)]
+#[diesel(table_name = email_recipients)]
+struct EmailRecipientChangeset<'a> {
+    is_sent: Option<bool>,
+    opened: Option<bool>,
+    reply: Option<&'a str>,
+    updated_at: Option<chrono::NaiveDateTime>,
+}
 
 fn constraint_err(err: impl std::fmt::Display) -> RepositoryError {
     RepositoryError::ValidationError(err.to_string())
@@ -32,7 +43,7 @@ impl EmailReader for DieselRepository {
         let mut conn = self.conn()?;
 
         let recipients = email_recipients::table
-            .filter(email_recipients::replied.eq(false))
+            .filter(email_recipients::reply.is_null())
             .inner_join(emails::table)
             .filter(emails::hub_id.eq(hub_id.get()))
             .select(DbEmailRecipient::as_select())
@@ -121,7 +132,6 @@ impl EmailWriter for DieselRepository {
                     opened: false,
                     updated_at: inserted.created_at,
                     is_sent: false,
-                    replied: false,
                     name: item.name.as_str(),
                     fields: &fields,
                 };
@@ -148,39 +158,56 @@ impl EmailWriter for DieselRepository {
     fn update_recipient(
         &self,
         recipient_id: EmailRecipientId,
-        updates: &DomainUpdateEmailRecipient,
+        updates: &UpdateEmailRecipient,
     ) -> RepositoryResult<DomainEmailWithRecipients> {
         use pushkind_emailer::schema::{email_recipients, emails};
 
         let mut conn = self.conn()?;
-        let email_id: i32 = email_recipients::table
-            .filter(email_recipients::id.eq(recipient_id.get()))
-            .select(email_recipients::email_id)
-            .first(&mut conn)?;
+        conn.transaction(|conn| {
+            let email_id: i32 = email_recipients::table
+                .filter(email_recipients::id.eq(recipient_id.get()))
+                .select(email_recipients::email_id)
+                .first(conn)?;
 
-        let changeset = DbUpdateEmailRecipient::from(updates);
-        diesel::update(email_recipients::table.filter(email_recipients::id.eq(recipient_id.get())))
-            .set(changeset)
-            .execute(&mut conn)?;
+            let reply = updates.reply.map(|reply| reply.as_str());
+            let mut changeset = EmailRecipientChangeset {
+                is_sent: updates.sent,
+                opened: updates.opened,
+                reply,
+                updated_at: None,
+            };
 
-        DbEmail::recalc_email_stats(&mut conn, email_id)?;
+            if changeset.is_sent.is_some()
+                || changeset.opened.is_some()
+                || changeset.reply.is_some()
+            {
+                changeset.updated_at = Some(Utc::now().naive_utc());
+                diesel::update(
+                    email_recipients::table.filter(email_recipients::id.eq(recipient_id.get())),
+                )
+                .set(&changeset)
+                .execute(conn)?;
+            }
 
-        let email = emails::table
-            .filter(emails::id.eq(email_id))
-            .select(DbEmail::as_select())
-            .first::<DbEmail>(&mut conn)?;
+            DbEmail::recalc_email_stats(conn, email_id)?;
 
-        let recipients = DbEmailRecipient::belonging_to(&email)
-            .select(DbEmailRecipient::as_select())
-            .load::<DbEmailRecipient>(&mut conn)?;
+            let email = emails::table
+                .filter(emails::id.eq(email_id))
+                .select(DbEmail::as_select())
+                .first::<DbEmail>(conn)?;
 
-        let email: DomainEmail = email.try_into().map_err(constraint_err)?;
-        let recipients = recipients
-            .into_iter()
-            .map(|recipient| recipient.try_into().map_err(constraint_err))
-            .collect::<RepositoryResult<Vec<_>>>()?;
+            let recipients = DbEmailRecipient::belonging_to(&email)
+                .select(DbEmailRecipient::as_select())
+                .load::<DbEmailRecipient>(conn)?;
 
-        Ok(DomainEmailWithRecipients { email, recipients })
+            let email: DomainEmail = email.try_into().map_err(constraint_err)?;
+            let recipients = recipients
+                .into_iter()
+                .map(|recipient| recipient.try_into().map_err(constraint_err))
+                .collect::<RepositoryResult<Vec<_>>>()?;
+
+            Ok(DomainEmailWithRecipients { email, recipients })
+        })
     }
 
     fn unsubscribe_recipient(
