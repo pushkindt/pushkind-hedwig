@@ -1,15 +1,16 @@
 mod common;
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 use diesel::{RunQueryDsl, connection::SimpleConnection};
 use pushkind_common::db::DbPool;
-use pushkind_emailer::domain::email::{NewEmail, NewEmailRecipient, UpdateEmailRecipient};
+use pushkind_emailer::domain::email::{NewEmail, NewEmailRecipient};
 use pushkind_emailer::domain::types::{
     EmailBody, EmailId, EmailRecipientId, EmailRecipientReply, HubId, RecipientEmail, RecipientName,
 };
 use pushkind_emailer::models::hub::NewHub as DbNewHub;
 use pushkind_emailer::schema::hubs;
+use pushkind_hedwig::domain::UpdateEmailRecipient;
 use pushkind_hedwig::repository::{DieselRepository, EmailReader, EmailWriter, HubReader};
 use tempfile::TempDir;
 
@@ -18,7 +19,7 @@ fn create_schema(pool: &DbPool) {
     conn.batch_execute(
         "CREATE TABLE hubs (id INTEGER PRIMARY KEY, login TEXT, password TEXT, sender TEXT, smtp_server TEXT, smtp_port INTEGER, created_at TIMESTAMP, updated_at TIMESTAMP, imap_server TEXT, imap_port INTEGER, email_template TEXT, imap_last_uid INTEGER NOT NULL DEFAULT 0);\n\
          CREATE TABLE emails (id INTEGER PRIMARY KEY, message TEXT NOT NULL, created_at TIMESTAMP NOT NULL, is_sent BOOL NOT NULL, subject TEXT, attachment BLOB, attachment_name TEXT, attachment_mime TEXT, num_sent INTEGER NOT NULL DEFAULT 0, num_opened INTEGER NOT NULL DEFAULT 0, num_replied INTEGER NOT NULL DEFAULT 0, hub_id INTEGER NOT NULL REFERENCES hubs(id));\n\
-         CREATE TABLE email_recipients (id INTEGER PRIMARY KEY, email_id INTEGER NOT NULL REFERENCES emails(id), address TEXT NOT NULL, opened BOOL NOT NULL, updated_at TIMESTAMP NOT NULL, is_sent BOOL NOT NULL, replied BOOL NOT NULL, name TEXT, fields TEXT, reply TEXT);"
+         CREATE TABLE email_recipients (id INTEGER PRIMARY KEY, email_id INTEGER NOT NULL REFERENCES emails(id), address TEXT NOT NULL, opened BOOL NOT NULL, updated_at TIMESTAMP NOT NULL, is_sent BOOL NOT NULL, reply TEXT, name TEXT, fields TEXT);"
     )
     .unwrap();
 }
@@ -64,7 +65,7 @@ fn create_email(repo: &DieselRepository) -> (i32, i32) {
         recipients: vec![NewEmailRecipient {
             address: RecipientEmail::try_from("to@example.com").unwrap(),
             name: RecipientName::new("Alice").unwrap(),
-            fields: HashMap::new(),
+            fields: BTreeMap::new(),
         }],
     };
     let stored = repo.create_email(&new_email).unwrap();
@@ -120,10 +121,9 @@ fn update_recipient_updates_stats() {
     repo.update_recipient(
         EmailRecipientId::try_from(recipient_id).unwrap(),
         &UpdateEmailRecipient {
-            is_sent: Some(true),
+            sent: Some(true),
             opened: Some(true),
-            replied: Some(true),
-            reply: Some(EmailRecipientReply::try_from("Thanks").unwrap()),
+            reply: Some(&EmailRecipientReply::try_from("Thanks").unwrap()),
         },
     )
     .unwrap();
@@ -136,7 +136,7 @@ fn update_recipient_updates_stats() {
         .unwrap()
         .unwrap();
     let rec = &updated.recipients[0];
-    assert!(rec.is_sent && rec.opened && rec.replied);
+    assert!(rec.is_sent && rec.opened && rec.reply.is_some());
     assert_eq!(
         rec.reply.as_ref().map(|reply| reply.as_str()),
         Some("Thanks")
